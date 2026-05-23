@@ -1,0 +1,6 @@
+# 红利周期投资周度评估系统 — 依赖
+pandas>=1.5.0
+numpy>=1.23.0
+python-dotenv>=1.0.0
+tushare>=1.4.0
+matplotlib>=3.7.0

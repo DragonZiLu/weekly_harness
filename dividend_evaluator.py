@@ -1,0 +1,1313 @@
+"""
+红利周期投资 — 企业量化评估程序
+======================================
+数据优先级：
+  1. tushare pro（实时行情 + 财务数据）
+  2. 网络搜集（tushare 缺失时补充）
+
+评估框架（基于红利周期三层估值体系）：
+  Layer 1: 股息率历史分位评分
+  Layer 2: 股债息差（核心锚）评分
+  Layer 3: 等效分红率（含回购）评分
+  Bonus:   确定性评级 / 护城河评估
+
+输出：
+  - 控制台彩色报告
+  - data/dividend_report.md（Markdown）
+  - data/dividend_chart.png（可视化图表）
+"""
+
+import sys
+import os
+import time
+import json
+from pathlib import Path
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Tuple
+
+import pandas as pd
+import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+from matplotlib import font_manager
+import warnings
+warnings.filterwarnings("ignore")
+
+# ─── 项目路径 ────────────────────────────────────────────────
+PROJECT_ROOT = Path(__file__).parent
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from config.settings import tushare_cfg
+import tushare as ts
+
+# ─── 中文字体（macOS 苹方 / SimHei）────────────────────────────
+def _setup_font():
+    fonts = [
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/Library/Fonts/Arial Unicode MS.ttf",
+    ]
+    for fp in fonts:
+        if Path(fp).exists():
+            font_manager.fontManager.addfont(fp)
+            prop = font_manager.FontProperties(fname=fp)
+            plt.rcParams["font.family"] = prop.get_name()
+            plt.rcParams["axes.unicode_minus"] = False
+            return
+    # 回退：使用 sans-serif
+    plt.rcParams["font.sans-serif"] = ["DejaVu Sans"]
+    plt.rcParams["axes.unicode_minus"] = False
+
+_setup_font()
+
+# ──────────────────────────────────────────────────────────────
+# 目标企业定义（红利周期投资体系）
+# ──────────────────────────────────────────────────────────────
+COMPANIES = {
+    # ── 第一类：弱周期红利 ─────────────────────────────────────
+    "水电": {
+        "长江电力": {"ts_code": "600900.SH", "category": "弱周期红利", "certainty": "A",
+                   "moat": "垄断水电资产·类债券", "comment": "红利标杆，终极养老标的"},
+        "国投电力": {"ts_code": "600886.SH", "category": "弱周期红利", "certainty": "A-",
+                   "moat": "水电+火电混合", "comment": "水电占比持续提升，红利成色增强"},
+    },
+    "运营商": {
+        "中国移动": {"ts_code": "600941.SH", "category": "弱周期红利", "certainty": "A",
+                   "moat": "央企垄断·5G+算力新曲线", "comment": "Token新增长曲线，分红持续提升"},
+        "中国电信": {"ts_code": "601728.SH", "category": "弱周期红利", "certainty": "A-",
+                   "moat": "央企垄断·云业务", "comment": "云网融合转型，分红稳定"},
+    },
+    "银行": {
+        "招商银行": {"ts_code": "600036.SH", "category": "弱周期红利", "certainty": "A",
+                   "moat": "庞大优质客户资源·零售之王", "comment": "仅次于四大行，保守预估2%增速"},
+        "工商银行": {"ts_code": "601398.SH", "category": "弱周期红利", "certainty": "AA",
+                   "moat": "系统重要性银行·国家信用", "comment": "四大行最高确定性，倒了买金条也没用"},
+        "农业银行": {"ts_code": "601288.SH", "category": "弱周期红利", "certainty": "AA",
+                   "moat": "系统重要性银行·三农优势", "comment": "四大行之一，高股息稳定"},
+        "建设银行": {"ts_code": "601939.SH", "category": "弱周期红利", "certainty": "AA",
+                   "moat": "系统重要性银行·基建优势", "comment": "四大行之一，高股息稳定"},
+        "中国银行": {"ts_code": "601988.SH", "category": "弱周期红利", "certainty": "AA",
+                   "moat": "系统重要性银行·国际化", "comment": "四大行之一，高股息稳定"},
+        "宁波银行": {"ts_code": "002142.SZ", "category": "弱周期红利", "certainty": "B+",
+                   "moat": "城商行龙头·零售+对公均衡", "comment": "ROE 12%+，成长性优于国有行，股息率偏低但增速快"},
+    },
+    "保险": {
+        "中国平安": {"ts_code": "601318.SH", "category": "弱周期红利", "certainty": "A-",
+                   "moat": "综合金融帝国·保险+银行+资管", "comment": "保险龙头，分红稳定增长，估值低位"},
+    },
+    # ── 第二类：消费/成长红利 ─────────────────────────────────
+    "家电": {
+        "美的集团": {"ts_code": "000333.SZ", "category": "消费成长红利", "certainty": "B+",
+                   "moat": "品牌+技术全球领先·出海逻辑", "comment": "大手笔回购注销，等效分红8%+"},
+        "海尔智家": {"ts_code": "600690.SH", "category": "消费成长红利", "certainty": "B+",
+                   "moat": "全球家电品牌矩阵", "comment": "出海+回购，等效分红提升"},
+        "格力电器": {"ts_code": "000651.SZ", "category": "消费成长红利", "certainty": "B+",
+                   "moat": "空调技术领先·高分红传统", "comment": "分红率高，回购力度增加"},
+    },
+    # ── 第三类：周期资源红利 ─────────────────────────────────
+    "矿业": {
+        "紫金矿业": {"ts_code": "601899.SH", "category": "周期资源红利", "certainty": "B+",
+                   "moat": "全球黄金/铜矿储量增长", "comment": "黄金4000/铜11000中枢，周期+成长"},
+    },
+    "石油": {
+        "中国海油": {"ts_code": "600938.SH", "category": "周期资源红利", "certainty": "B+",
+                   "moat": "低成本海上油田·央企", "comment": "油价50美元仍可高分红，安全边际高"},
+    },
+    "煤炭": {
+        "陕西煤业": {"ts_code": "601225.SH", "category": "周期资源红利", "certainty": "B",
+                   "moat": "优质煤矿资源·低成本", "comment": "熊市表现佳，高股息防御性强"},
+        "中国神华": {"ts_code": "601088.SH", "category": "周期资源红利", "certainty": "B+",
+                   "moat": "煤电运一体化·全产业链", "comment": "煤炭龙头，一体化壁垒，分红率超70%"},
+    },
+}
+
+# 红利周期投资评估阈值
+THRESHOLDS = {
+    # 弱周期红利买入股息率阈值
+    "弱周期_买入": 4.0,
+    "弱周期_极佳": 5.5,
+    # 消费成长红利阈值（含回购）
+    "消费_买入": 5.0,
+    "消费_等效分红_买入": 8.0,
+    # 周期资源股息率阈值
+    "周期_买入": 5.0,
+    "周期_极佳": 7.0,
+    # 10年国债利率（实时，近似值）
+    "bond_yield_10y": 1.65,  # 2026年5月约1.65%
+}
+
+# 网络补充数据（tushare 缺失时使用，2026-05-22 数据）
+FALLBACK_DATA = {
+    "600900.SH": {  # 长江电力
+        "close": 26.85, "pe_ttm": 18.5, "pb": 3.2,
+        "div_yield": 3.74,  # 2025年DPS=1.0，华泰证券数据
+        "roe": 14.2, "dps_latest": 1.0,
+        "buyback_yield": 0.0, "revenue_growth": 2.07, "net_profit_growth": 6.17,
+        "payout_ratio": 70.9, "total_mv": 6550.0,
+        "note": "2025年报：营收862亿+2.07%，净利润345亿+6.17%，DPS 1.0元"
+    },
+    "600886.SH": {  # 国投电力
+        "close": 12.50, "pe_ttm": 16.0, "pb": 2.1,
+        "div_yield": 4.2, "roe": 13.0, "dps_latest": 0.52,
+        "buyback_yield": 0.0, "revenue_growth": 5.0, "net_profit_growth": 8.0,
+        "payout_ratio": 55.0, "total_mv": 900.0,
+        "note": "水电占比持续提升，分红稳定增长"
+    },
+    "600941.SH": {  # 中国移动
+        "close": 95.98, "pe_ttm": 15.31, "pb": 1.5,
+        # 2025全年分红=中期+年报共4.7037元/股，股价95.98元，自算4.90%
+        "div_yield": 4.90, "roe": 9.97, "dps_latest": 4.7037,
+        "buyback_yield": 0.5, "revenue_growth": 3.0, "net_profit_growth": 5.0,
+        "payout_ratio": 70.0, "total_mv": 20000.0,
+        "note": "2025全年分红4.7037元/股，股价95.98元，股息率4.90%；Token新增长曲线"
+    },
+    "601728.SH": {  # 中国电信
+        "close": 6.15, "pe_ttm": 17.77, "pb": 1.2,
+        # 2025全年分红=中期+年报到0.272元/股，股价6.15元，自算4.42%
+        "div_yield": 4.42, "roe": 7.27, "dps_latest": 0.272,
+        "buyback_yield": 0.3, "revenue_growth": 4.0, "net_profit_growth": 6.0,
+        "payout_ratio": 65.0, "total_mv": 5800.0,
+        "note": "2025全年分红0.272元/股，股价6.15元，股息率4.42%"
+    },
+    "600036.SH": {  # 招商银行
+        "close": 38.50, "pe_ttm": 7.8, "pb": 1.1,
+        # 2025年全年分红 = 中期1.013 + 年报预案1.003 = 2.016元/股
+        # 正常股息率 ≈ 2.016 / 37.15 = 5.43%（tushare dv_ttm=8.11%含2024年特别大额分红2.0元）
+        "div_yield": 5.4,
+        "roe": 12.0, "dps_latest": 2.02,
+        "buyback_yield": 0.0, "revenue_growth": -2.0, "net_profit_growth": 1.2,
+        "payout_ratio": 33.0, "total_mv": 9700.0,
+        "note": "2025年全年分红约2.02元/股（中期+年报预案），正常股息率约5.4%；tushare dv_ttm含2024特别高分红偏高"
+    },
+    "601398.SH": {  # 工商银行
+        "close": 7.18, "pe_ttm": 6.89, "pb": 0.77,
+        # 2025全年分红=中期0.1414+年报0.1689=0.3103元/股，股价7.18元，股息率4.32%
+        # tushare自算4.32%已准确（年报已于2026-05-13除权）
+        "div_yield": 4.32, "roe": 12.5, "dps_latest": 0.31,
+        "buyback_yield": 0.0, "revenue_growth": -1.0, "net_profit_growth": 0.5,
+        "payout_ratio": 30.0, "total_mv": 26000.0,
+        "note": "2025全年分红0.3103元/股(中期0.1414+年报0.1689)，股价7.18元，股息率4.32%；年报已于2026-05-13除权"
+    },
+    "601288.SH": {  # 农业银行
+        "close": 6.46, "pe_ttm": 7.68, "pb": 0.79,
+        # 2025全年分红=中期0.1195+年报0.1300=0.2495元/股，股价6.46元，股息率3.86%
+        # 注：年报0.13已于2026-05-13除权，自算3.86%准确
+        "div_yield": 3.86, "roe": 9.2, "dps_latest": 0.25,
+        "buyback_yield": 0.0, "revenue_growth": -0.5, "net_profit_growth": 0.8,
+        "payout_ratio": 30.0, "total_mv": 17500.0,
+        "note": "2025全年分红0.2495元/股(中期0.1195+年报0.1300)，股价6.46元，股息率3.86%；年报已除权"
+    },
+    "601939.SH": {  # 建设银行
+        "close": 10.05, "pe_ttm": 7.7, "pb": 0.73,
+        # 2025年全年分红 = 中期0.1858 + 年报预案0.2029 = 0.3887元/股
+        # 正确股息率 = 0.3887 / 10.05 = 3.87%（tushare dv_ttm=1.85%因年报分红未除权严重偏低）
+        # fallback数据6.3%偏高，网络验证华创证券给出约4.1%（含目标价溢价），按实际股价修正为3.87%
+        "div_yield": 3.87,
+        "roe": 9.7, "dps_latest": 0.39,
+        "buyback_yield": 0.0, "revenue_growth": -1.2, "net_profit_growth": 0.9,
+        "payout_ratio": 30.0, "total_mv": 24400.0,
+        "note": "2025全年分红0.389元/股(中期0.186+年报0.203)，股价10.05元，股息率3.87%；tushare原始1.85%因未除权严重偏低，网络验证修正"
+    },
+    "601988.SH": {  # 中国银行
+        "close": 5.77, "pe_ttm": 7.8, "pb": 0.68,
+        # 2025年全年分红约0.307元/股（中期+年报），÷股价5.77元≈5.3%
+        # tushare原始1.89%严重偏低（年报分红未除权），fallback6.8%偏高
+        # 网络验证：国联民生PE=7.8x，申万宏源给出"约4%"（单次年报分红计算）
+        # 含中期分红的全年口径正确值约5.0-5.3%
+        "div_yield": 5.1,
+        "roe": 8.3, "dps_latest": 0.31,
+        "buyback_yield": 0.0, "revenue_growth": -0.8, "net_profit_growth": 0.3,
+        "payout_ratio": 30.0, "total_mv": 21000.0,
+        "note": "2025全年分红约0.307元/股(中+年报)，股价5.77元，股息率约5.1%；网络验证国联民生PE=7.8x"
+    },
+    "002142.SZ": {  # 宁波银行
+        "close": 31.09, "pe_ttm": 6.82, "pb": 0.88,
+        # 2025年全年分红=中期0.3+年报0.9=1.2元/股，÷31.09元=3.86%
+        # 自算可以直接获取，fallback供兜底
+        "div_yield": 3.86,
+        "roe": 12.21, "dps_latest": 1.2,
+        "buyback_yield": 0.0, "revenue_growth": 3.0, "net_profit_growth": 8.13,
+        "payout_ratio": 22.0, "total_mv": 20530.0,
+        "note": "2025全年分红1.2元/股(中期0.3+年报0.9)，股价31.09元，股息率3.86%；ROE 12%城商行龙头"
+    },
+    "000333.SZ": {  # 美的集团
+        # 网络验证：多机构PE≈13x，EPS约6.19元，股价≈81元
+        # 2025年全年分红=中期0.5+年报3.8=4.3元/股，÷81元≈5.3%
+        # 国联民生说"接近7%"可能基于更低时点股价（约62元时的数字）
+        "close": 81.0, "pe_ttm": 13.0, "pb": 4.8,
+        "div_yield": 5.3, "roe": 20.0, "dps_latest": 4.30,
+        "buyback_yield": 4.5, "revenue_growth": 10.0, "net_profit_growth": 14.0,
+        "payout_ratio": 70.0, "total_mv": 5600.0,
+        "note": "网络验证：PE≈13x(国联民生)，股价≈81元，2025全年分红4.3元/股，股息率5.3%；等效分红=5.3%+4.5%=9.8%"
+    },
+    "600690.SH": {  # 海尔智家
+        # 网络验证：开源证券2026-04-29 PE=9.7x，EPS=2.21元，股价≈21.4元
+        # 2025年报全年分红0.8867元/股，÷21.4元≈4.1%（tushare 3.8%轻微偏低因除权时间差）
+        "close": 21.4, "pe_ttm": 9.7, "pb": 2.9,
+        "div_yield": 4.2, "roe": 17.0, "dps_latest": 0.89,
+        "buyback_yield": 3.0, "revenue_growth": 8.0, "net_profit_growth": 9.0,
+        "payout_ratio": 42.0, "total_mv": 1950.0,
+        "note": "网络验证：开源证券PE=9.7x，股价≈21.4元，2025年报每股0.8867元，股息率4.2%；等效分红=4.2%+3%=7.2%"
+    },
+    "000651.SZ": {  # 格力电器
+        "close": 35.00, "pe_ttm": 9.5, "pb": 2.5,
+        "div_yield": 6.0, "roe": 28.0, "dps_latest": 2.10,
+        "buyback_yield": 1.5, "revenue_growth": 2.0, "net_profit_growth": 3.0,
+        "payout_ratio": 55.0, "total_mv": 2100.0,
+        "note": "高分红传统，空调市场龙头，等效分红率约7.5%"
+    },
+    "601899.SH": {  # 紫金矿业
+        # 网络验证：国联民生2026-04-24 PE=11x（2026E），财信证券10.37x，中邮10.27x
+        # 2025年全年分红=中期0.22+年报0.38=0.60元，EPS约2.7元×PE11≈29.7元
+        # 股息率=0.60/29.7≈2.0%；tushare dv_ttm=1.7%基本吻合
+        # tushare实测：close=29.99元，dv_ttm=1.66%，pe=12.9x（2026-05-21）市值7975亿
+        # 网络验证：国联民生PE=11x（2026-04-24，更早时点），财信10.37x，当前PE因股价上涨约12.9x
+        # 全年分红0.60元/29.99元=2.0%；tushare dv_ttm=1.66%略低可能因部分分红尚未除权
+        "close": 29.99, "pe_ttm": 12.9, "pb": 4.2,
+        "div_yield": 2.0, "roe": 31.8, "dps_latest": 0.60,
+        "buyback_yield": 0.3, "revenue_growth": 15.0, "net_profit_growth": 61.5,
+        "payout_ratio": 22.0, "total_mv": 7975.0,
+        "note": "tushare实测(2026-05-21)：股价29.99元，PE=12.9x，市值7975亿；全年分红0.60元，股息率2.0%"
+    },
+    "600938.SH": {  # 中国海油
+        # 网络验证：信达证券2026-04-29明确"A股收盘价对应PE=12.02x"，EPS=3.31元，推算股价≈39.8元
+        # 2025全年分红约1.46元/股（含中期），÷40元≈3.65%
+        # tushare实测：close=36.22元，dv_ttm=3.51%，pe=13.8x（2026-05-21）
+        # 网络：信达证券PE=12.02x（2026-04-29，价格较低时点）；当前市值约1.72万亿
+        "close": 36.22, "pe_ttm": 13.8, "pb": 1.9,
+        "div_yield": 3.51, "roe": 18.0, "dps_latest": 1.27,
+        "buyback_yield": 0.0, "revenue_growth": -5.0, "net_profit_growth": -8.0,
+        "payout_ratio": 45.0, "total_mv": 17215.0,
+        "note": "tushare实测(2026-05-21)：股价36.22元，PE=13.8x，dv_ttm=3.51%；网络验证信达证券12.02x（4月底较低价时点）"
+    },
+    "601318.SH": {  # 中国平安
+        # 中国平安2025年报：归母净利润1266亿+18.9%，营运利润1219亿+9.5%
+        # 2025年全年分红=中期0.93+年报1.62=2.55元/股，股价约52元，股息率约4.9%
+        # ROE约13.5%，PE(TTM)约8.5x，PB约1.05x
+        "close": 52.0, "pe_ttm": 8.5, "pb": 1.05,
+        "div_yield": 4.9, "roe": 13.5, "dps_latest": 2.55,
+        "buyback_yield": 0.5, "revenue_growth": 5.0, "net_profit_growth": 18.9,
+        "payout_ratio": 42.0, "total_mv": 9500.0,
+        "note": "2025年报：归母净利润1266亿+18.9%，全年分红2.55元/股(中0.93+年报1.62)，股息率约4.9%；综合金融帝国，分红持续提升"
+    },
+    "601088.SH": {  # 中国神华
+        # 中国神华2025年报：营收3448亿+0.6%，归母净利润586亿-0.4%
+        # 2025年全年分红=中期1.11+年报1.11=2.22元/股，股价约38元，股息率约5.8%
+        # ROE约14%，PE(TTM)约8.5x，PB约1.3x，分红率超70%
+        "close": 38.0, "pe_ttm": 8.5, "pb": 1.30,
+        "div_yield": 5.8, "roe": 14.0, "dps_latest": 2.22,
+        "buyback_yield": 0.0, "revenue_growth": 0.6, "net_profit_growth": -0.4,
+        "payout_ratio": 72.0, "total_mv": 7550.0,
+        "note": "2025年报：营收3448亿+0.6%，归母净利润586亿-0.4%，全年分红2.22元/股(中1.11+年报1.11)，股息率约5.8%；煤电运一体化龙头，分红率超70%"
+    },
+    "601225.SH": {  # 陕西煤业
+        # 网络验证：中国银河2026-05-11明确"当前收盘价对应股息率为4.0%，2025年每股分红0.948元"
+        # 推算股价 = 0.948 / 4.0% = 23.7元；PE=12.8x（2026E预测）
+        # tushare实测：close=23.42元，dv_ttm=5.02%，pe=14.0x（2026-05-21）
+        # dv_ttm=5.02%含近12个月TTM分红（包含中期+年报两次分红）
+        # 中国银河2026-05-11说"4.0%"是仅按2025年报单次分红0.948元/23.7元计算
+        # tushare的5.02%更准确（反映全年度真实股东回报）
+        "close": 23.42, "pe_ttm": 14.0, "pb": 2.6,
+        "div_yield": 5.02, "roe": 25.0, "dps_latest": 0.95,
+        "buyback_yield": 0.0, "revenue_growth": -10.0, "net_profit_growth": -12.0,
+        "payout_ratio": 58.0, "total_mv": 2271.0,
+        "note": "tushare实测(2026-05-21)：股价23.42元，PE=14x，dv_ttm=5.02%(TTM含中期+年报)；中国银河4.0%仅算单次年报分红"
+    },
+}
+
+
+# ──────────────────────────────────────────────────────────────
+# tushare 数据获取
+# ──────────────────────────────────────────────────────────────
+class TushareDataFetcher:
+    def __init__(self):
+        try:
+            ts.set_token(tushare_cfg.token)
+            self.pro = ts.pro_api()
+            print("✅ tushare pro 初始化成功")
+        except Exception as e:
+            print(f"⚠️  tushare 初始化失败: {e}")
+            self.pro = None
+
+    def _safe_call(self, func_name: str, **kwargs) -> Optional[pd.DataFrame]:
+        """带重试的 API 调用"""
+        if self.pro is None:
+            return None
+        for attempt in range(3):
+            try:
+                time.sleep(0.3)  # 限流
+                result = getattr(self.pro, func_name)(**kwargs)
+                if result is not None and not result.empty:
+                    return result
+                return pd.DataFrame()
+            except Exception as e:
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                else:
+                    print(f"    ⚠️  {func_name} 失败: {e}")
+                    return None
+
+    def get_daily_basic(self, ts_code: str) -> Optional[Dict]:
+        """获取最新交易日行情+估值指标"""
+        # 获取最近20个交易日的数据
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+
+        df = self._safe_call(
+            "daily_basic",
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields="ts_code,trade_date,close,pe_ttm,pb,ps_ttm,dv_ttm,total_mv,circ_mv,turnover_rate"
+        )
+        if df is None or df.empty:
+            return None
+
+        df = df.sort_values("trade_date", ascending=False)
+        row = df.iloc[0]
+
+        # dv_ttm = TTM股息率(%)
+        return {
+            "close": float(row.get("close", 0) or 0),
+            "pe_ttm": float(row.get("pe_ttm", 0) or 0),
+            "pb": float(row.get("pb", 0) or 0),
+            "div_yield": float(row.get("dv_ttm", 0) or 0),  # tushare dv_ttm即股息率(%)
+            "total_mv": float(row.get("total_mv", 0) or 0) / 10000,  # 转换为亿元
+            "trade_date": str(row.get("trade_date", "")),
+        }
+
+    def get_financial_indicator(self, ts_code: str) -> Optional[Dict]:
+        """获取最新财务指标（ROE, 分红率等）
+        
+        注意：
+          - tushare fina_indicator 的 roe 是单期ROE（季度值），需识别是否年报
+          - 优先取最新年报数据（end_date 末尾为1231）
+          - netprofit_yoy/or_yoy 是同比增速（%）
+        """
+        df = self._safe_call(
+            "fina_indicator",
+            ts_code=ts_code,
+            fields="ts_code,ann_date,end_date,roe,netprofit_yoy,or_yoy,profit_dedt,basic_eps,dps"
+        )
+        if df is None or df.empty:
+            return None
+
+        df = df.sort_values("ann_date", ascending=False).reset_index(drop=True)
+        
+        # 优先取最新年报（end_date 以 1231 结尾）
+        annual = df[df["end_date"].astype(str).str.endswith("1231")]
+        if not annual.empty:
+            row = annual.iloc[0]
+            # 年报 ROE 是全年值，直接使用
+            roe = float(row.get("roe", 0) or 0)
+        else:
+            # 无年报时取最新期，季度ROE × 4 近似年化
+            row = df.iloc[0]
+            end_date = str(row.get("end_date", ""))
+            roe_raw = float(row.get("roe", 0) or 0)
+            # 若是季报（0331/0630/0930），做简单年化
+            if end_date.endswith("0331"):
+                roe = roe_raw * 4
+            elif end_date.endswith("0630"):
+                roe = roe_raw * 2
+            elif end_date.endswith("0930"):
+                roe = roe_raw * 4 / 3
+            else:
+                roe = roe_raw
+
+        return {
+            "roe": round(roe, 2),
+            "net_profit_growth": float(row.get("netprofit_yoy", 0) or 0),
+            "revenue_growth": float(row.get("or_yoy", 0) or 0),
+            "dps_latest": float(row.get("dps", 0) or 0),
+            "ann_date": str(row.get("ann_date", "")),
+        }
+
+    def get_real_div_yield(self, ts_code: str, close: float) -> Optional[float]:
+        """
+        从 dividend 接口自算真实年化股息率。
+
+        逻辑：
+          取最新会计年度（end_year）的所有分红批次，
+          状态为「实施」或「股东大会通过」均计入（不等待除权）。
+          对同一个 end_date + div_proc 对，只保留一条（去重），
+          因为 tushare 有时会对同一笔分红同时存"股东大会通过"和"实施"两条。
+
+          优先取「实施」记录，若无「实施」则取「股东大会通过」，
+          同一 end_date 下每个状态只取一条，合计为当年度每股分红。
+
+          目标年度选取：取近两年中数据更完整的一年（按批次数判断）。
+
+        Returns
+        -------
+        float | None : 股息率(%)，失败时返回 None
+        """
+        if close <= 0:
+            return None
+
+        df = self._safe_call(
+            "dividend",
+            ts_code=ts_code,
+            fields="ts_code,end_date,ann_date,div_proc,cash_div_tax,ex_date,pay_date"
+        )
+        if df is None or df.empty:
+            return None
+
+        # 纳入「预案」「股东大会通过」「实施」三种状态
+        # 预案 = 董事会公告，极少被否决，纳入后可得到更完整的当年预期股息率
+        valid_procs = {"预案", "股东大会通过", "实施"}
+        df = df[df["div_proc"].isin(valid_procs)].copy()
+        if df.empty:
+            return None
+
+        df["end_date"] = df["end_date"].astype(str)
+        df["cash_div_tax"] = pd.to_numeric(df["cash_div_tax"], errors="coerce").fillna(0)
+        df["end_year"] = df["end_date"].str[:4]
+
+        # 去重：同一 end_date，优先保留状态更进阶的记录
+        # 实施(0) > 股东大会通过(1) > 预案(2)，取优先级最高的那条
+        proc_priority = {"实施": 0, "股东大会通过": 1, "预案": 2}
+        df["proc_rank"] = df["div_proc"].map(proc_priority)
+        df_dedup = (
+            df.sort_values("proc_rank")
+            .drop_duplicates(subset=["end_date"], keep="first")
+        )
+
+        # 按年度汇总
+        year_sums = df_dedup.groupby("end_year")["cash_div_tax"].sum()
+
+        # 选取目标年度：取近两年（当前年和上一年）中，分红批次最多的一年
+        current_year = str(datetime.now().year)
+        prev_year = str(datetime.now().year - 1)
+
+        # 各年的批次数（未去重前，反映分红次数）
+        year_counts = df_dedup.groupby("end_year")["end_date"].count()
+
+        target_year = None
+        for year in [current_year, prev_year]:
+            if year in year_sums and year_sums[year] > 0:
+                target_year = year
+                break
+
+        if target_year is None:
+            return None
+
+        total_dps = year_sums[target_year]
+        if total_dps <= 0:
+            return None
+
+        div_yield = round(total_dps / close * 100, 4)
+        return div_yield
+
+    def get_dividend_history(self, ts_code: str) -> Optional[pd.DataFrame]:
+        """获取分红历史（计算历史股息率区间）"""
+        df = self._safe_call(
+            "dividend",
+            ts_code=ts_code,
+            fields="ts_code,end_date,ann_date,div_proc,stk_div,cash_div,cash_div_tax,record_date,ex_date,pay_date"
+        )
+        return df
+
+    def get_repurchase(self, ts_code: str) -> Optional[pd.DataFrame]:
+        """获取回购记录"""
+        df = self._safe_call(
+            "repurchase",
+            ts_code=ts_code,
+            fields="ts_code,ann_date,end_date,proc,exp_date,vol,amount,high_limit,low_limit"
+        )
+        return df
+
+
+# ──────────────────────────────────────────────────────────────
+# 红利周期投资评估引擎
+# ──────────────────────────────────────────────────────────────
+class DividendCycleEvaluator:
+    """
+    基于红利周期投资体系的企业量化评估引擎
+    
+    评分维度：
+    S1: 股息率评分 (0-30分) - 核心
+    S2: 股债息差评分 (0-25分) - 核心锚
+    S3: 等效分红率评分 (0-20分)
+    S4: 护城河/确定性评分 (0-15分)
+    S5: 成长性评分 (0-10分)
+    总分: 0-100分
+    """
+
+    BOND_YIELD = THRESHOLDS["bond_yield_10y"]  # 10年国债收益率
+
+    def __init__(self):
+        self.fetcher = TushareDataFetcher()
+        self.results: List[Dict] = []
+
+    def _get_company_data(self, name: str, ts_code: str) -> Dict:
+        """获取单只股票数据（tushare优先，fallback补充）"""
+        print(f"  📊 获取 {name} ({ts_code}) 数据...", end=" ")
+
+        # Step 1: tushare 实时数据
+        basic = self.fetcher.get_daily_basic(ts_code)
+        fina = self.fetcher.get_financial_indicator(ts_code)
+
+        # Step 2: 整合数据
+        data = {}
+        fallback = FALLBACK_DATA.get(ts_code, {})
+
+        # 行情数据（股价/PE/PB/市值）
+        if basic:
+            data["close"] = basic["close"]
+            data["pe_ttm"] = basic["pe_ttm"]
+            data["pb"] = basic["pb"]
+            data["total_mv"] = basic["total_mv"]
+            data["trade_date"] = basic["trade_date"]
+            data["source_basic"] = "tushare"
+            print(f"✅ 行情", end=" ")
+        else:
+            data.update({k: fallback.get(k, 0) for k in ["close", "pe_ttm", "pb", "total_mv"]})
+            data["trade_date"] = "fallback"
+            data["source_basic"] = "fallback"
+            print(f"⚠️fallback行情", end=" ")
+
+        # 股息率：优先用 dividend 接口自算（含「股东大会通过」），保证当年完整分红
+        close_price = data.get("close", 0)
+        fallback_div = fallback.get("div_yield", 0)
+        dv_ttm_raw = basic["div_yield"] if basic else 0.0
+        real_div = self.fetcher.get_real_div_yield(ts_code, close_price) if close_price > 0 else None
+
+        if real_div and real_div >= 0.3:
+            # 如果自算值比 fallback 低 30% 以上，说明年报分红尚未公告，
+            # 用 fallback 兜底（fallback 是手工核验的完整全年值）
+            if fallback_div > 0 and real_div < fallback_div * 0.7:
+                data["div_yield"] = fallback_div
+                data["source_basic"] += f"(div=fallback兜底,自算{real_div:.2f}%<全年预期)"
+                print(f"⚠️ 股息率自算{real_div:.2f}%不完整→用fallback{fallback_div:.2f}%", end=" ")
+            else:
+                data["div_yield"] = real_div
+                data["source_basic"] += "(div=自算年化)"
+                print(f"✅ 股息率={real_div:.2f}%", end=" ")
+        else:
+            if fallback_div > 0:
+                data["div_yield"] = fallback_div
+                data["source_basic"] += "(div=fallback)"
+            elif dv_ttm_raw >= 0.3:
+                data["div_yield"] = dv_ttm_raw
+                data["source_basic"] += "(div=dv_ttm)"
+            else:
+                data["div_yield"] = 0.0
+            print(f"⚠️ 股息率fallback={data['div_yield']:.2f}%", end=" ")
+
+        # ── 自验证：透传三源原始值供 Validator 交叉核对 ──────────────
+        data["_div_self_calc"] = round(real_div, 4) if real_div else None
+        data["_div_dv_ttm"]    = round(dv_ttm_raw, 4) if dv_ttm_raw else None
+        data["_div_fallback"]  = round(fallback_div, 4) if fallback_div else None
+        data["_close_fallback"] = fallback.get("close", None)
+
+        # 财务数据（ROE/增速）
+        if fina:
+            data["roe"] = fina["roe"]
+            data["net_profit_growth"] = fina["net_profit_growth"]
+            data["revenue_growth"] = fina["revenue_growth"]
+            data["dps_latest"] = fina["dps_latest"]
+            data["source_fina"] = "tushare"
+            print(f"✅ 财务")
+        else:
+            data.update({k: fallback.get(k, 0) for k in ["roe", "net_profit_growth", "revenue_growth", "dps_latest"]})
+            data["source_fina"] = "fallback"
+            print(f"⚠️fallback财务")
+
+        # 从 fallback 补充 tushare 没有的字段
+        data["buyback_yield"] = fallback.get("buyback_yield", 0.0)
+        data["payout_ratio"] = fallback.get("payout_ratio", 30.0)
+        data["note"] = fallback.get("note", "")
+
+        return data
+
+    # ──────────────── 评分函数 ────────────────────────────────
+
+    def score_dividend_yield(self, div_yield: float, category: str) -> Tuple[float, str]:
+        """S1: 股息率评分 (0-30分)"""
+        if category == "弱周期红利":
+            # 弱周期：5%+ 满分，4%良好，3.5%及格，<3%不及格
+            if div_yield >= 5.5:
+                return 30, f"★★★★★ {div_yield:.1f}% 历史极值区间"
+            elif div_yield >= 5.0:
+                return 27, f"★★★★☆ {div_yield:.1f}% 历史高位"
+            elif div_yield >= 4.5:
+                return 23, f"★★★★ {div_yield:.1f}% 较高区间"
+            elif div_yield >= 4.0:
+                return 18, f"★★★ {div_yield:.1f}% 合理买点"
+            elif div_yield >= 3.5:
+                return 12, f"★★☆ {div_yield:.1f}% 偏低，可观察"
+            else:
+                return 5, f"★ {div_yield:.1f}% 偏低，暂不买"
+        elif category == "消费成长红利":
+            # 消费类：现金分红3%+即可，主要看等效分红率
+            if div_yield >= 5.0:
+                return 28, f"★★★★★ {div_yield:.1f}% 消费类高股息"
+            elif div_yield >= 4.0:
+                return 24, f"★★★★ {div_yield:.1f}% 较高"
+            elif div_yield >= 3.0:
+                return 18, f"★★★ {div_yield:.1f}% 合理"
+            elif div_yield >= 2.0:
+                return 10, f"★★ {div_yield:.1f}% 偏低，需回购补足"
+            else:
+                return 4, f"★ {div_yield:.1f}% 过低"
+        else:  # 周期资源红利
+            if div_yield >= 7.0:
+                return 30, f"★★★★★ {div_yield:.1f}% 周期高峰/价格支撑"
+            elif div_yield >= 5.0:
+                return 24, f"★★★★ {div_yield:.1f}% 较高"
+            elif div_yield >= 3.5:
+                return 15, f"★★★ {div_yield:.1f}% 合理"
+            else:
+                return 6, f"★★ {div_yield:.1f}% 偏低"
+
+    def score_bond_spread(self, div_yield: float) -> Tuple[float, str]:
+        """S2: 股债息差评分 (0-25分)"""
+        spread = div_yield - self.BOND_YIELD
+        spread_bp = spread * 100  # 转为基点
+
+        if spread_bp >= 300:
+            return 25, f"息差 {spread_bp:.0f}BP ≫ 历史极高，极佳买点 🔥"
+        elif spread_bp >= 230:
+            return 22, f"息差 {spread_bp:.0f}BP 历史最高区间，大胆攒股"
+        elif spread_bp >= 180:
+            return 18, f"息差 {spread_bp:.0f}BP 历史较高区间，积极布局"
+        elif spread_bp >= 130:
+            return 14, f"息差 {spread_bp:.0f}BP 高于历史中枢(~100BP)，合理"
+        elif spread_bp >= 80:
+            return 9, f"息差 {spread_bp:.0f}BP 接近历史中枢，谨慎"
+        elif spread_bp >= 30:
+            return 4, f"息差 {spread_bp:.0f}BP 低于历史中枢，偏贵"
+        else:
+            return 0, f"息差 {spread_bp:.0f}BP 过低，放缓节奏"
+
+    def score_effective_yield(self, div_yield: float, buyback_yield: float, category: str) -> Tuple[float, str]:
+        """S3: 等效分红率评分 (0-20分)"""
+        eff_yield = div_yield + buyback_yield
+
+        if category == "消费成长红利":
+            # 消费类标准更高：红利周期投资要求8%+
+            if eff_yield >= 9.0:
+                return 20, f"等效分红 {eff_yield:.1f}% 超越目标(8%)，优秀"
+            elif eff_yield >= 8.0:
+                return 17, f"等效分红 {eff_yield:.1f}% 达到目标阈值"
+            elif eff_yield >= 6.0:
+                return 12, f"等效分红 {eff_yield:.1f}% 低于目标，需提升"
+            else:
+                return 5, f"等效分红 {eff_yield:.1f}% 显著低于目标"
+        else:
+            # 其他类：单纯现金股息
+            if eff_yield >= 7.0:
+                return 20, f"等效分红 {eff_yield:.1f}% 极高"
+            elif eff_yield >= 5.5:
+                return 16, f"等效分红 {eff_yield:.1f}% 高"
+            elif eff_yield >= 4.0:
+                return 11, f"等效分红 {eff_yield:.1f}% 合理"
+            else:
+                return 5, f"等效分红 {eff_yield:.1f}% 偏低"
+
+    def score_certainty(self, certainty: str, moat: str) -> Tuple[float, str]:
+        """S4: 确定性/护城河评分 (0-15分)"""
+        mapping = {
+            "AA": (15, "系统性银行·国家信用背书"),
+            "A": (13, "垄断资产·核心护城河"),
+            "A-": (11, "行业领先·护城河较强"),
+            "B+": (8, "竞争优势明显·周期属性"),
+            "B": (5, "行业竞争·需关注周期底部"),
+            "B-": (3, "护城河一般"),
+        }
+        score, reason = mapping.get(certainty, (5, "待评估"))
+        return score, f"[{certainty}级] {reason} | {moat}"
+
+    def score_growth(self, roe: float, net_profit_growth: float, category: str) -> Tuple[float, str]:
+        """S5: 成长性评分 (0-10分)"""
+        if category == "周期资源红利":
+            # 周期类：不用高增速，稳定ROE更重要
+            if roe >= 20:
+                return 9, f"ROE {roe:.1f}% 周期类优秀"
+            elif roe >= 15:
+                return 7, f"ROE {roe:.1f}% 较好"
+            elif roe >= 10:
+                return 5, f"ROE {roe:.1f}% 合理"
+            else:
+                return 2, f"ROE {roe:.1f}% 偏低"
+        elif category == "弱周期红利":
+            # 弱周期：保守增速2%即可，稳定性更重要
+            if roe >= 15 and net_profit_growth >= 0:
+                return 9, f"ROE {roe:.1f}% 稳定增长 {net_profit_growth:.1f}%"
+            elif roe >= 10:
+                return 7, f"ROE {roe:.1f}% 稳定"
+            elif roe >= 8:
+                return 5, f"ROE {roe:.1f}% 可接受"
+            else:
+                return 3, f"ROE {roe:.1f}% 偏低"
+        else:  # 消费成长
+            if roe >= 25 and net_profit_growth >= 10:
+                return 10, f"ROE {roe:.1f}% 强劲增长 {net_profit_growth:.1f}%"
+            elif roe >= 20:
+                return 8, f"ROE {roe:.1f}% 优质成长"
+            elif roe >= 15:
+                return 6, f"ROE {roe:.1f}% 较好"
+            else:
+                return 3, f"ROE {roe:.1f}% 一般"
+
+    def _get_verdict(self, total_score: float, div_yield: float, category: str) -> Tuple[str, str]:
+        """红利周期投资体系操作建议"""
+        eff_buy_threshold = THRESHOLDS.get(
+            f"{'弱周期' if '弱' in category else ('消费' if '消费' in category else '周期')}_买入", 4.0
+        )
+
+        if total_score >= 80:
+            return "🔥 大胆攒股", "处于黄金坑，建议底仓+逢跌加仓至满仓"
+        elif total_score >= 65:
+            return "✅ 积极布局", "性价比高，建3-4成底仓，网格化买入"
+        elif total_score >= 50:
+            return "👀 观察等待", f"有一定吸引力但未达极佳买点，等待股息率>{eff_buy_threshold+0.5:.1f}%"
+        elif total_score >= 35:
+            return "⏸️  暂缓", "估值偏高或不确定性大，放缓节奏"
+        else:
+            return "🚫 回避", "当前不符合红利周期投资体系买入标准"
+
+    def evaluate_company(self, name: str, ts_code: str, meta: Dict) -> Dict:
+        """评估单家企业"""
+        category = meta["category"]
+        certainty = meta["certainty"]
+        moat = meta["moat"]
+
+        # 获取数据
+        data = self._get_company_data(name, ts_code)
+
+        # 评分
+        s1, r1 = self.score_dividend_yield(data["div_yield"], category)
+        s2, r2 = self.score_bond_spread(data["div_yield"])
+        s3, r3 = self.score_effective_yield(data["div_yield"], data["buyback_yield"], category)
+        s4, r4 = self.score_certainty(certainty, moat)
+        s5, r5 = self.score_growth(data["roe"], data["net_profit_growth"], category)
+
+        total = s1 + s2 + s3 + s4 + s5
+        verdict, advice = self._get_verdict(total, data["div_yield"], category)
+
+        # 分红复投10年预测
+        drip_10y = self._drip_projection(data["div_yield"], 10)
+
+        return {
+            "name": name,
+            "ts_code": ts_code,
+            "category": category,
+            "certainty": certainty,
+            "moat": moat,
+            "comment": meta.get("comment", ""),
+            # 数据
+            "close": data["close"],
+            "pe_ttm": data["pe_ttm"],
+            "pb": data["pb"],
+            "div_yield": data["div_yield"],
+            "eff_yield": data["div_yield"] + data["buyback_yield"],
+            "buyback_yield": data["buyback_yield"],
+            "roe": data["roe"],
+            "net_profit_growth": data["net_profit_growth"],
+            "bond_spread_bp": (data["div_yield"] - self.BOND_YIELD) * 100,
+            "total_mv": data["total_mv"],
+            "payout_ratio": data["payout_ratio"],
+            "note": data["note"],
+            "source": f"{data['source_basic']}/{data['source_fina']}",
+            # 评分
+            "s1_div": s1, "r1": r1,
+            "s2_spread": s2, "r2": r2,
+            "s3_eff": s3, "r3": r3,
+            "s4_certainty": s4, "r4": r4,
+            "s5_growth": s5, "r5": r5,
+            "total_score": total,
+            "verdict": verdict,
+            "advice": advice,
+            "drip_10y": drip_10y,
+            # ── 自验证透传字段（供 Validator 交叉核对，不用于评分）──
+            "_div_self_calc":  data.get("_div_self_calc"),
+            "_div_dv_ttm":     data.get("_div_dv_ttm"),
+            "_div_fallback":   data.get("_div_fallback"),
+            "_close_fallback": data.get("_close_fallback"),
+        }
+
+    def _drip_projection(self, initial_yield: float, years: int) -> Dict:
+        """
+        分红复投复利预测（假设股价不涨）
+        初始投入100万，计算持股数量和分红增长
+        """
+        invest = 100.0  # 万元
+        # 简化：假设股息率固定，每年分红复投（买同等股息率的股权）
+        # 成本股息率提升 = (1 + yield/100)^n * yield
+        cost_yield = initial_yield
+        annual_div = invest * cost_yield / 100
+        results = {}
+        cumulative_cost_yield = initial_yield
+
+        for y in range(1, years + 1):
+            cumulative_cost_yield = cumulative_cost_yield * (1 + initial_yield / 100)
+            annual_div_y = invest * cumulative_cost_yield / 100
+            results[f"第{y}年"] = {
+                "成本股息率": round(cumulative_cost_yield, 2),
+                "年分红(万)": round(annual_div_y, 2),
+            }
+
+        return {
+            "第1年分红": round(invest * initial_yield / 100, 2),
+            "第5年成本股息率": round(results.get("第5年", {}).get("成本股息率", initial_yield), 2),
+            "第10年成本股息率": round(results.get("第10年", {}).get("成本股息率", initial_yield), 2),
+            "第10年年分红": round(results.get("第10年", {}).get("年分红(万)", 0), 2),
+        }
+
+    def evaluate_all(self) -> List[Dict]:
+        """评估所有企业"""
+        print("\n" + "=" * 65)
+        print("  🌊 红利周期投资 — 企业量化评估系统")
+        print(f"  📅 评估日期: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        print(f"  📡 10年国债收益率: {self.BOND_YIELD}%")
+        print("=" * 65 + "\n")
+
+        for sector, companies in COMPANIES.items():
+            print(f"━━ 【{sector}】 ━━")
+            for name, meta in companies.items():
+                result = self.evaluate_company(name, meta["ts_code"], meta)
+                self.results.append(result)
+                print(f"    → 总分: {result['total_score']:.0f}/100 | {result['verdict']}")
+
+        return self.results
+
+    def evaluate_all_to_json(self, bond_yield_override: Optional[float] = None) -> Dict:
+        """
+        评估所有企业并返回结构化 JSON（供 weekly_harness 使用）
+
+        Parameters
+        ----------
+        bond_yield_override : float, optional
+            覆盖默认的10年国债收益率（供 Planner 传入实时数据）
+
+        Returns
+        -------
+        dict : {
+            "week": str,          # ISO 周号，如 "2026-W21"
+            "timestamp": str,     # ISO 时间戳
+            "bond_yield_10y": float,
+            "scores": { ts_code: {...} },
+            "summary": { "strong_buy": [...], "buy": [...], ... }
+        }
+        """
+        if bond_yield_override is not None:
+            self.BOND_YIELD = bond_yield_override
+
+        if not self.results:
+            self.evaluate_all()
+
+        now = datetime.now()
+        iso_week = now.strftime("%G-W%V")  # e.g. "2026-W21"
+
+        scores = {}
+        for r in self.results:
+            scores[r["ts_code"]] = {
+                "name": r["name"],
+                "sector": next(
+                    (s for s, cos in COMPANIES.items() if r["name"] in cos), "未知"
+                ),
+                "category": r["category"],
+                "certainty": r["certainty"],
+                "total_score": r["total_score"],
+                "verdict": r["verdict"],
+                "close": r["close"],
+                "pe_ttm": r["pe_ttm"],
+                "pb": r["pb"],
+                "div_yield": r["div_yield"],
+                "buyback_yield": r["buyback_yield"],
+                "eff_yield": r["eff_yield"],
+                "bond_spread_bp": r["bond_spread_bp"],
+                "roe": r["roe"],
+                "net_profit_growth": r["net_profit_growth"],
+                "total_mv": r["total_mv"],
+                "source": r["source"],
+                # 分项评分
+                "s1_div": r["s1_div"],
+                "s2_spread": r["s2_spread"],
+                "s3_eff": r["s3_eff"],
+                "s4_certainty": r["s4_certainty"],
+                "s5_growth": r["s5_growth"],
+                # 评分理由
+                "r1": r["r1"], "r2": r["r2"], "r3": r["r3"],
+                "r4": r["r4"], "r5": r["r5"],
+                "advice": r["advice"],
+                "drip_10y": r["drip_10y"],
+                "note": r["note"],
+                # ── 自验证字段（透传给 Validator）──
+                "_div_self_calc":  r.get("_div_self_calc"),
+                "_div_dv_ttm":     r.get("_div_dv_ttm"),
+                "_div_fallback":   r.get("_div_fallback"),
+                "_close_fallback": r.get("_close_fallback"),
+            }
+
+        # 按操作建议分组
+        summary: Dict[str, List] = {
+            "strong_buy": [],   # 80+
+            "buy": [],          # 65-79
+            "watch": [],        # 50-64
+            "hold": [],         # 35-49
+            "avoid": [],        # <35
+        }
+        for ts_code, s in scores.items():
+            sc = s["total_score"]
+            if sc >= 80:
+                summary["strong_buy"].append(ts_code)
+            elif sc >= 65:
+                summary["buy"].append(ts_code)
+            elif sc >= 50:
+                summary["watch"].append(ts_code)
+            elif sc >= 35:
+                summary["hold"].append(ts_code)
+            else:
+                summary["avoid"].append(ts_code)
+
+        return {
+            "week": iso_week,
+            "timestamp": now.isoformat(timespec="seconds"),
+            "bond_yield_10y": self.BOND_YIELD,
+            "scores": scores,
+            "summary": summary,
+        }
+
+
+# ──────────────────────────────────────────────────────────────
+# 报告生成
+# ──────────────────────────────────────────────────────────────
+class ReportGenerator:
+    def __init__(self, results: List[Dict]):
+        self.results = sorted(results, key=lambda x: x["total_score"], reverse=True)
+        self.output_dir = PROJECT_ROOT / "data"
+        self.output_dir.mkdir(exist_ok=True)
+
+    def _category_emoji(self, category: str) -> str:
+        return {"弱周期红利": "💧", "消费成长红利": "📦", "周期资源红利": "⛏️"}.get(category, "📊")
+
+    def generate_markdown(self) -> str:
+        """生成 Markdown 报告"""
+        now = datetime.now().strftime("%Y-%m-%d %H:%M")
+        lines = [
+            "# 🌊 红利周期投资 — 企业量化评估报告",
+            f"\n> **评估日期**: {now}  \n> **数据来源**: tushare pro + 网络补充  \n> **评估框架**: 三层股息估值 + 护城河 + 成长性",
+            f"\n> **10年国债收益率**: {THRESHOLDS['bond_yield_10y']}% (2026年5月)\n",
+            "\n---\n",
+        ]
+
+        # 排行榜
+        lines.append("## 📊 综合排行榜（总分 0-100）\n")
+        lines.append("| 排名 | 企业 | 类别 | 股息率 | 息差(BP) | 等效分红 | ROE | 总分 | 操作建议 |")
+        lines.append("|------|------|------|--------|---------|---------|-----|------|---------|")
+        for i, r in enumerate(self.results, 1):
+            emoji = self._category_emoji(r["category"])
+            lines.append(
+                f"| {i} | **{r['name']}** | {emoji}{r['category'][:4]} | "
+                f"{r['div_yield']:.1f}% | {r['bond_spread_bp']:.0f} | "
+                f"{r['eff_yield']:.1f}% | {r['roe']:.1f}% | "
+                f"**{r['total_score']:.0f}** | {r['verdict']} |"
+            )
+
+        # 分类详情
+        categories_order = ["弱周期红利", "消费成长红利", "周期资源红利"]
+        cat_labels = {"弱周期红利": "第一类：弱周期红利（最优先）",
+                      "消费成长红利": "第二类：消费/成长红利（中等难度）",
+                      "周期资源红利": "第三类：周期资源红利（最高难度）"}
+
+        for cat in categories_order:
+            cat_results = [r for r in self.results if r["category"] == cat]
+            if not cat_results:
+                continue
+
+            emoji = self._category_emoji(cat)
+            lines.append(f"\n---\n\n## {emoji} {cat_labels[cat]}\n")
+
+            for r in cat_results:
+                lines.append(f"### {r['name']} ({r['ts_code']})\n")
+                lines.append(f"> 💬 **点评**: {r['comment']}\n")
+                lines.append(f"**护城河**: {r['moat']}  **确定性等级**: {r['certainty']}\n")
+                lines.append(f"> 📝 数据备注: {r['note']}\n")
+
+                # 估值数据
+                lines.append("**核心估值指标**\n")
+                lines.append("| 指标 | 数值 | 说明 |")
+                lines.append("|------|------|------|")
+                lines.append(f"| 当前股价 | {r['close']:.2f}元 | 来源: {r['source']} |")
+                lines.append(f"| TTM市盈率 | {r['pe_ttm']:.1f}x | |")
+                lines.append(f"| 市净率 | {r['pb']:.2f}x | |")
+                lines.append(f"| 现金股息率 | **{r['div_yield']:.2f}%** | 核心指标 |")
+                lines.append(f"| 回购收益率 | {r['buyback_yield']:.1f}% | 等效分红组成 |")
+                lines.append(f"| **等效分红率** | **{r['eff_yield']:.2f}%** | 含回购的真实股东回报 |")
+                lines.append(f"| 股债息差 | **{r['bond_spread_bp']:.0f}BP** | 超10Y国债({THRESHOLDS['bond_yield_10y']}%) |")
+                lines.append(f"| ROE | {r['roe']:.1f}% | |")
+                lines.append(f"| 净利润增速 | {r['net_profit_growth']:.1f}% | TTM |")
+                lines.append(f"| 总市值 | {r['total_mv']:.0f}亿元 | |")
+                lines.append("")
+
+                # 评分明细
+                lines.append("**红利周期三层评估评分**\n")
+                lines.append("| 评估维度 | 得分 | 满分 | 评价 |")
+                lines.append("|----------|------|------|------|")
+                lines.append(f"| S1 股息率 | {r['s1_div']} | 30 | {r['r1']} |")
+                lines.append(f"| S2 股债息差 | {r['s2_spread']} | 25 | {r['r2']} |")
+                lines.append(f"| S3 等效分红率 | {r['s3_eff']} | 20 | {r['r3']} |")
+                lines.append(f"| S4 护城河确定性 | {r['s4_certainty']} | 15 | {r['r4']} |")
+                lines.append(f"| S5 成长性ROE | {r['s5_growth']} | 10 | {r['r5']} |")
+                lines.append(f"| **合计** | **{r['total_score']:.0f}** | **100** | {r['verdict']} |")
+                lines.append("")
+
+                # 分红复投预测
+                drip = r["drip_10y"]
+                lines.append("**分红复投测算（100万初始投入，假设股价不涨）**\n")
+                lines.append(f"- 第1年分红: **{drip['第1年分红']:.1f}万**")
+                lines.append(f"- 第5年成本股息率: **{drip['第5年成本股息率']:.1f}%**")
+                lines.append(f"- 第10年成本股息率: **{drip['第10年成本股息率']:.1f}%**")
+                lines.append(f"- 第10年年分红: **{drip['第10年年分红']:.1f}万**")
+                lines.append("")
+
+                # 操作建议
+                lines.append(f"**操作建议**: {r['verdict']}  \n**策略**: {r['advice']}\n")
+
+        # 总结
+        top3 = self.results[:3]
+        lines.append("\n---\n\n## 🏆 当前最优配置建议\n")
+        lines.append("根据红利周期投资体系评分，当前最值得攒股的标的：\n")
+        for i, r in enumerate(top3, 1):
+            emoji = self._category_emoji(r["category"])
+            lines.append(f"{i}. **{r['name']}** — {emoji} {r['verdict']}")
+            lines.append(f"   - 股息率 {r['div_yield']:.1f}% | 息差 {r['bond_spread_bp']:.0f}BP | 总分 {r['total_score']:.0f}/100")
+            lines.append(f"   - {r['advice']}\n")
+
+        lines.append("\n> ⚠️ **免责声明**: 本报告仅供学习研究，不构成投资建议。投资有风险，决策需谨慎。\n")
+        lines.append(f"\n---\n*生成时间: {now} | 框架: 红利周期投资量化实现*")
+
+        report = "\n".join(lines)
+        report_path = self.output_dir / "dividend_report.md"
+        with open(report_path, "w", encoding="utf-8") as f:
+            f.write(report)
+        print(f"\n✅ Markdown 报告已保存: {report_path}")
+        return report
+
+    def generate_chart(self):
+        """生成可视化图表"""
+        df = pd.DataFrame(self.results)
+
+        fig = plt.figure(figsize=(20, 22))
+        fig.patch.set_facecolor("#0d1117")
+        gs = fig.add_gridspec(3, 3, hspace=0.45, wspace=0.35)
+
+        colors_cat = {
+            "弱周期红利": "#4ecdc4",
+            "消费成长红利": "#f9ca24",
+            "周期资源红利": "#e17055",
+        }
+        bar_colors = [colors_cat.get(c, "#gray") for c in df["category"]]
+
+        # ── 图1: 综合总分排行 ──────────────────────────────────
+        ax1 = fig.add_subplot(gs[0, :])
+        ax1.set_facecolor("#161b22")
+        names = df["name"].tolist()
+        scores = df["total_score"].tolist()
+        bars = ax1.barh(names, scores, color=bar_colors, alpha=0.85, height=0.6)
+        ax1.set_xlim(0, 110)
+        ax1.axvline(80, color="#ff6b6b", linestyle="--", alpha=0.6, label="极佳买点(80+)")
+        ax1.axvline(65, color="#ffd93d", linestyle="--", alpha=0.6, label="积极布局(65+)")
+        ax1.axvline(50, color="#6bcb77", linestyle="--", alpha=0.4, label="观察等待(50+)")
+
+        for bar, score in zip(bars, scores):
+            ax1.text(bar.get_width() + 0.5, bar.get_y() + bar.get_height() / 2,
+                     f"{score:.0f}分", va="center", ha="left", color="white", fontsize=9)
+
+        ax1.set_title("红利周期投资综合评分排行（满分100）", color="white", pad=12, fontsize=13, fontweight="bold")
+        ax1.tick_params(colors="white", labelsize=9)
+        ax1.spines[:].set_color("#30363d")
+        legend = ax1.legend(loc="lower right", facecolor="#161b22", edgecolor="#30363d",
+                            labelcolor="white", fontsize=8)
+        # 添加图例区分颜色
+        patches = [mpatches.Patch(color=v, label=k, alpha=0.85) for k, v in colors_cat.items()]
+        ax1.legend(handles=patches, loc="upper right", facecolor="#161b22",
+                   edgecolor="#30363d", labelcolor="white", fontsize=8)
+
+        # ── 图2: 股息率 vs 市场（散点图）────────────────────────
+        ax2 = fig.add_subplot(gs[1, 0])
+        ax2.set_facecolor("#161b22")
+        for cat, grp in df.groupby("category"):
+            ax2.scatter(grp["pe_ttm"], grp["div_yield"],
+                        c=colors_cat[cat], s=120, alpha=0.85, label=cat, zorder=3)
+            for _, row in grp.iterrows():
+                ax2.annotate(row["name"][:2], (row["pe_ttm"], row["div_yield"]),
+                             fontsize=7, color="white", xytext=(3, 3),
+                             textcoords="offset points")
+
+        ax2.axhline(THRESHOLDS["bond_yield_10y"], color="#aaa", linestyle=":", alpha=0.7,
+                    label=f"国债收益率 {THRESHOLDS['bond_yield_10y']}%")
+        ax2.axhline(5.0, color="#ffd93d", linestyle="--", alpha=0.5, label="5% 优质红利线")
+        ax2.set_xlabel("PE(TTM)", color="#8b949e", fontsize=9)
+        ax2.set_ylabel("股息率 (%)", color="#8b949e", fontsize=9)
+        ax2.set_title("估值 vs 股息率", color="white", fontsize=10, pad=8)
+        ax2.tick_params(colors="white", labelsize=8)
+        ax2.spines[:].set_color("#30363d")
+        ax2.legend(fontsize=7, facecolor="#161b22", edgecolor="#30363d", labelcolor="white")
+
+        # ── 图3: 股债息差对比 ─────────────────────────────────
+        ax3 = fig.add_subplot(gs[1, 1])
+        ax3.set_facecolor("#161b22")
+        spread_colors = ["#ff6b6b" if x >= 230 else "#ffd93d" if x >= 130 else "#6bcb77"
+                         for x in df["bond_spread_bp"]]
+        ax3.barh(df["name"], df["bond_spread_bp"], color=spread_colors, alpha=0.85, height=0.6)
+        ax3.axvline(100, color="#aaa", linestyle="--", alpha=0.6, label="历史中枢~100BP")
+        ax3.axvline(230, color="#ff6b6b", linestyle="--", alpha=0.6, label="极佳买点>230BP")
+        ax3.set_title("股债息差 (BP)", color="white", fontsize=10, pad=8)
+        ax3.tick_params(colors="white", labelsize=8)
+        ax3.spines[:].set_color("#30363d")
+        ax3.legend(fontsize=7, facecolor="#161b22", edgecolor="#30363d", labelcolor="white")
+
+        # ── 图4: 等效分红率（含回购） ─────────────────────────
+        ax4 = fig.add_subplot(gs[1, 2])
+        ax4.set_facecolor("#161b22")
+        x = range(len(df))
+        ax4.bar(x, df["div_yield"], color="#4ecdc4", alpha=0.85, label="现金股息率")
+        ax4.bar(x, df["buyback_yield"], bottom=df["div_yield"], color="#f9ca24",
+                alpha=0.85, label="回购收益率")
+        ax4.axhline(5.0, color="#ff6b6b", linestyle="--", alpha=0.7, label="5%目标线")
+        ax4.axhline(8.0, color="#e17055", linestyle="--", alpha=0.7, label="8%优秀线")
+        ax4.set_xticks(list(x))
+        ax4.set_xticklabels([n[:2] for n in df["name"]], color="white", fontsize=8)
+        ax4.set_title("等效分红率 = 现金股息 + 回购", color="white", fontsize=10, pad=8)
+        ax4.tick_params(colors="white", labelsize=8)
+        ax4.spines[:].set_color("#30363d")
+        ax4.legend(fontsize=7, facecolor="#161b22", edgecolor="#30363d", labelcolor="white")
+
+        # ── 图5: 分红复投10年增长曲线（TOP5）────────────────────
+        ax5 = fig.add_subplot(gs[2, :2])
+        ax5.set_facecolor("#161b22")
+        top5 = df.head(5)
+        years = list(range(1, 11))
+
+        for _, row in top5.iterrows():
+            init_yield = row["div_yield"] / 100
+            cost_yields = []
+            cy = row["div_yield"]
+            for y in years:
+                cy = cy * (1 + row["div_yield"] / 100)
+                cost_yields.append(cy)
+            ax5.plot(years, cost_yields,
+                     marker="o", markersize=4, label=row["name"],
+                     color=colors_cat.get(row["category"], "#aaa"), linewidth=2, alpha=0.85)
+
+        ax5.axhline(8.0, color="#ff6b6b", linestyle="--", alpha=0.6, label="8%复利目标")
+        ax5.set_xlabel("持有年数", color="#8b949e", fontsize=9)
+        ax5.set_ylabel("成本股息率 (%)", color="#8b949e", fontsize=9)
+        ax5.set_title("分红复投复利曲线（假设股价不涨，100万投入）", color="white", fontsize=10, pad=8)
+        ax5.tick_params(colors="white", labelsize=8)
+        ax5.spines[:].set_color("#30363d")
+        ax5.legend(fontsize=8, facecolor="#161b22", edgecolor="#30363d", labelcolor="white")
+
+        # ── 图6: 雷达图（TOP1企业）─────────────────────────────
+        ax6 = fig.add_subplot(gs[2, 2], projection="polar")
+        ax6.set_facecolor("#161b22")
+        top1 = self.results[0]
+        categories_radar = ["股息率\n(×30)", "股债息差\n(×25)", "等效分红\n(×20)", "确定性\n(×15)", "成长性\n(×10)"]
+        values = [
+            top1["s1_div"] / 30 * 100,
+            top1["s2_spread"] / 25 * 100,
+            top1["s3_eff"] / 20 * 100,
+            top1["s4_certainty"] / 15 * 100,
+            top1["s5_growth"] / 10 * 100,
+        ]
+        values += values[:1]
+        N = len(categories_radar)
+        angles = [n / float(N) * 2 * np.pi for n in range(N)]
+        angles += angles[:1]
+
+        ax6.plot(angles, values, color=colors_cat.get(top1["category"], "#4ecdc4"),
+                 linewidth=2, linestyle="solid")
+        ax6.fill(angles, values, alpha=0.25, color=colors_cat.get(top1["category"], "#4ecdc4"))
+        ax6.set_xticks(angles[:-1])
+        ax6.set_xticklabels(categories_radar, size=8, color="white")
+        ax6.set_ylim(0, 100)
+        ax6.tick_params(colors="white", labelsize=7)
+        ax6.set_title(f"TOP1: {top1['name']}\n总分{top1['total_score']:.0f}/100",
+                      color="white", fontsize=10, pad=20)
+        ax6.set_facecolor("#161b22")
+        ax6.spines["polar"].set_color("#30363d")
+        ax6.yaxis.set_tick_params(labelcolor="#8b949e")
+
+        # 总标题
+        fig.suptitle("🌊 红利周期投资 — 企业量化评估报告",
+                     fontsize=15, color="white", y=0.98, fontweight="bold")
+
+        chart_path = self.output_dir / "dividend_chart.png"
+        plt.savefig(chart_path, dpi=150, bbox_inches="tight",
+                    facecolor="#0d1117", edgecolor="none")
+        plt.close()
+        print(f"✅ 可视化图表已保存: {chart_path}")
+
+    def print_console_report(self):
+        """控制台彩色输出报告"""
+        print("\n" + "=" * 65)
+        print("  🏆 红利周期投资 — 企业评估综合排行榜")
+        print("=" * 65)
+
+        cat_order = ["弱周期红利", "消费成长红利", "周期资源红利"]
+        cat_labels = {
+            "弱周期红利": "💧 第一类：弱周期红利",
+            "消费成长红利": "📦 第二类：消费成长红利",
+            "周期资源红利": "⛏️  第三类：周期资源红利",
+        }
+
+        for cat in cat_order:
+            cat_res = sorted(
+                [r for r in self.results if r["category"] == cat],
+                key=lambda x: x["total_score"], reverse=True
+            )
+            if not cat_res:
+                continue
+            print(f"\n{cat_labels[cat]}")
+            print("-" * 60)
+            print(f"{'企业':<8} {'股息率':>6} {'息差BP':>7} {'等效分红':>8} {'ROE':>6} {'总分':>6} {'建议'}")
+            print("-" * 60)
+            for r in cat_res:
+                score_bar = "█" * int(r["total_score"] / 10) + "░" * (10 - int(r["total_score"] / 10))
+                print(
+                    f"{r['name']:<8} "
+                    f"{r['div_yield']:>5.1f}% "
+                    f"{r['bond_spread_bp']:>6.0f} "
+                    f"{r['eff_yield']:>7.1f}% "
+                    f"{r['roe']:>5.1f}% "
+                    f"{r['total_score']:>5.0f} "
+                    f"{r['verdict']}"
+                )
+                print(f"         [{score_bar}] {r['advice'][:45]}")
+
+        print("\n" + "=" * 65)
+        print("  🔝 当前最值得攒股的 TOP3 标的：")
+        print("=" * 65)
+        for i, r in enumerate(self.results[:3], 1):
+            print(f"  {i}. {r['name']} | 总分 {r['total_score']:.0f} | {r['verdict']}")
+            drip = r["drip_10y"]
+            print(f"     💰 100万投入: 第1年分红{drip['第1年分红']}万 → 第10年{drip['第10年年分红']}万")
+            print(f"     📋 {r['comment']}")
+        print()
+
+
+# ──────────────────────────────────────────────────────────────
+# 主程序入口
+# ──────────────────────────────────────────────────────────────
+def main():
+    evaluator = DividendCycleEvaluator()
+    results = evaluator.evaluate_all()
+
+    reporter = ReportGenerator(results)
+    reporter.print_console_report()
+    reporter.generate_markdown()
+    reporter.generate_chart()
+
+    print("\n✅ 评估完成！")
+    print(f"   📄 报告: data/dividend_report.md")
+    print(f"   📊 图表: data/dividend_chart.png")
+
+
+if __name__ == "__main__":
+    main()

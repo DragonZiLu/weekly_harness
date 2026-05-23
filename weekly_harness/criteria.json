@@ -1,0 +1,86 @@
+{
+  "version": "1.0",
+  "description": "红利周期投资评估标准 — 基于 Harness 设计框架",
+  "last_updated": "2026-05-22",
+
+  "scoring_weights": {
+    "s1_dividend_yield":  { "max": 30, "description": "股息率分位评分（核心）" },
+    "s2_bond_spread":     { "max": 25, "description": "股债息差评分（核心锚）" },
+    "s3_effective_yield": { "max": 20, "description": "等效分红率（含回购）评分" },
+    "s4_certainty":       { "max": 15, "description": "护城河/确定性评分" },
+    "s5_growth":          { "max": 10, "description": "成长性/ROE评分" }
+  },
+
+  "signal_thresholds": {
+    "strong_buy": { "score_min": 80, "label": "🔥 大胆攒股",  "description": "处于黄金坑，底仓+逢跌加仓" },
+    "buy":        { "score_min": 65, "label": "✅ 积极布局",  "description": "性价比高，建3-4成底仓" },
+    "watch":      { "score_min": 50, "label": "👀 观察等待",  "description": "有吸引力但未到极佳买点" },
+    "hold":       { "score_min": 35, "label": "⏸️ 暂缓",     "description": "估值偏高或不确定性大" },
+    "avoid":      { "score_min": 0,  "label": "🚫 回避",     "description": "不符合红利周期投资标准" }
+  },
+
+  "data_validation_rules": [
+    {
+      "field": "div_yield",
+      "range": [0.5, 15.0],
+      "anomaly_action": "use_fallback",
+      "note": "股息率超出范围触发 fallback 校准"
+    },
+    {
+      "field": "pe_ttm",
+      "range": [2.0, 60.0],
+      "anomaly_action": "flag_and_continue",
+      "note": "PE 异常时标注但不替换"
+    },
+    {
+      "field": "roe",
+      "range": [0.0, 60.0],
+      "anomaly_action": "flag_and_continue",
+      "note": "ROE 超出范围时标注"
+    },
+    {
+      "field": "close",
+      "range": [0.5, 5000.0],
+      "anomaly_action": "flag_and_continue",
+      "note": "股价范围合理性检查"
+    }
+  ],
+
+  "alert_rules": {
+    "score_drop_major":    { "threshold": 20, "description": "评分下降超过20分触发告警" },
+    "score_rise_major":    { "threshold": 15, "description": "评分上升超过15分触发告警" },
+    "yield_change_pct":    { "threshold": 0.5, "description": "股息率变化超过50%（相对变化）触发告警" },
+    "signal_change":       { "description": "操作信号变化（如从观察→大胆攒股）触发告警" },
+    "div_yield_ttm_ratio": {
+      "too_low": 0.5,
+      "too_high": 1.5,
+      "description": "tushare dv_ttm 与 fallback 比值超出0.5-1.5范围触发校准"
+    }
+  },
+
+  "category_thresholds": {
+    "弱周期红利": {
+      "buy_yield": 4.0,
+      "great_yield": 5.5,
+      "description": "弱周期股息率4%+买入，5.5%+极佳"
+    },
+    "消费成长红利": {
+      "buy_yield": 3.0,
+      "great_eff_yield": 8.0,
+      "description": "消费类以等效分红率8%+为目标"
+    },
+    "周期资源红利": {
+      "buy_yield": 5.0,
+      "great_yield": 7.0,
+      "description": "周期类股息率5%+买入，7%+极佳（但需警惕利润周期性）"
+    }
+  },
+
+  "context_strategy": {
+    "history_raw_weeks": 26,
+    "history_summary_quarters": 8,
+    "chart_display_weeks": 52,
+    "compaction_trigger_weeks": 13,
+    "description": "保留26周原始数据+8个季度摘要；图表显示最近52周趋势"
+  }
+}
