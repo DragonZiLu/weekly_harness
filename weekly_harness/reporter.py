@@ -225,6 +225,97 @@ class WeeklyReporter:
             print(f"    ⚠️  {ts_code} 历史对比表生成失败: {e}")
             return None
 
+    def _get_etf_dividend_history_table(self, ts_code: str, bond_yield: float, lookback_years: int = 10) -> Optional[str]:
+        """获取 ETF 近N年分红+年内最高最低净值+股息率对比表"""
+        try:
+            import tushare as ts
+            ts.set_token(tushare_cfg.token)
+            pro = ts.pro_api()
+        except Exception:
+            return None
+
+        try:
+            # 1. 分红历史（fund_div）
+            df_div = pro.fund_div(ts_code=ts_code)
+            if df_div is None or df_div.empty:
+                return None
+
+            df_div["div_cash"] = pd.to_numeric(df_div["div_cash"], errors="coerce").fillna(0)
+            df_div = df_div[df_div["div_cash"] > 0]
+            if df_div.empty:
+                return None
+
+            df_div["ex_date"] = df_div["ex_date"].astype(str)
+            df_div = df_div[df_div["ex_date"].str.len() >= 4]
+
+            # 去重：同一 ex_date 只保留一条（fund_div 可能对同一笔分红存多条记录）
+            df_div = df_div.drop_duplicates(subset=["ex_date"], keep="first")
+
+            df_div["year"] = df_div["ex_date"].str[:4]
+            df_div = df_div.sort_values("ex_date")
+
+            # 按年汇总分红
+            annual_div = df_div.groupby("year")["div_cash"].sum().reset_index()
+            annual_div.columns = ["year", "total_div"]
+
+            cutoff_year = str(datetime.now().year - lookback_years)
+            annual_div = annual_div[annual_div["year"] >= cutoff_year]
+            if annual_div.empty:
+                return None
+
+            # 2. 每日净值（年内最高最低）
+            start_date = f"{cutoff_year}0101"
+            end_date = datetime.now().strftime("%Y%m%d")
+
+            time.sleep(0.3)
+            df_daily = pro.fund_daily(ts_code=ts_code, start_date=start_date, end_date=end_date,
+                                      fields='ts_code,trade_date,close,high,low')
+            if df_daily is None or df_daily.empty:
+                return None
+
+            df_daily = df_daily.sort_values('trade_date')
+            df_daily['year'] = df_daily['trade_date'].astype(str).str[:4]
+            yearly_hl = df_daily.groupby('year').agg(
+                year_high=('high', 'max'),
+                year_low=('low', 'min'),
+            ).reset_index()
+
+            # 3. 合并
+            merged = pd.merge(annual_div, yearly_hl, on='year', how='inner')
+            merged = merged.sort_values('year')
+            if merged.empty:
+                return None
+
+            # 4. 生成表格
+            lines = []
+            lines.append("| 年度 | 每份分红(元) | 年内最高 | 年内最低 | 最高股息率 | 最低股息率 | 国债收益率 | 最高息差(BP) |")
+            lines.append("|------|-------------|---------|---------|-----------|-----------|-----------|-------------|")
+
+            for _, row in merged.iterrows():
+                yr = row['year']
+                dps = float(row['total_div'])
+                yh = float(row['year_high'])
+                yl = float(row['year_low'])
+
+                max_div = dps / yl * 100 if yl > 0 else 0
+                min_div = dps / yh * 100 if yh > 0 else 0
+                max_spread = (max_div - bond_yield) * 100
+
+                lines.append(
+                    f"| {yr} | {dps:.4f} | {yh:.3f} | {yl:.3f} | "
+                    f"{max_div:.2f}% | {min_div:.2f}% | {bond_yield:.2f}% | {max_spread:.0f} |"
+                )
+
+            lines.append(f"\n> * 当前年份数据截至 {datetime.now().strftime('%Y-%m-%d')}")
+            lines.append(f"> * 国债收益率统一使用当前值 {bond_yield:.2f}%")
+            lines.append(f"> * ETF 分红来自 fund_div 接口，股息率 = 每份分红÷净值")
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            print(f"    ⚠️  {ts_code} ETF历史对比表生成失败: {e}")
+            return None
+
     def _load_history(self) -> pd.DataFrame:
         """加载历史周评分数据"""
         if not self.history_csv.exists():
@@ -500,7 +591,7 @@ class WeeklyReporter:
         for i, (ts_code, s) in enumerate(sorted_scores, 1):
             conf = confidence_map.get(ts_code, "high")
             conf_icon = "✅" if conf == "high" else "⚠️" if conf == "medium" else "❌"
-            cat_short = {"弱周期红利": "弱周期", "消费成长红利": "消费成长", "周期资源红利": "周期资源"}.get(
+            cat_short = {"弱周期红利": "弱周期", "消费成长红利": "消费成长", "周期资源红利": "周期资源", "ETF红利": "ETF红利"}.get(
                 s["category"], s["category"][:4]
             )
             lines.append(
@@ -515,12 +606,13 @@ class WeeklyReporter:
             ("弱周期红利", "第一类：弱周期红利"),
             ("消费成长红利", "第二类：消费/成长红利"),
             ("周期资源红利", "第三类：周期资源红利"),
+            ("ETF红利", "第四类：ETF红利"),
         ]:
             cat_items = [(c, s) for c, s in sorted_scores if s["category"] == cat]
             if not cat_items:
                 continue
 
-            emoji = {"弱周期红利": "💧", "消费成长红利": "📦", "周期资源红利": "⛏️"}.get(cat, "📊")
+            emoji = {"弱周期红利": "💧", "消费成长红利": "📦", "周期资源红利": "⛏️", "ETF红利": "📈"}.get(cat, "📊")
             lines.append(f"\n---\n\n## {emoji} {cat_label}\n")
 
             for ts_code, s in cat_items:
@@ -528,18 +620,38 @@ class WeeklyReporter:
                 lines.append(f"### {s['name']} ({ts_code}) — {s['verdict']}\n")
                 lines.append(f"| 指标 | 值 | 评分详情 |")
                 lines.append(f"|------|-----|---------|")
-                lines.append(f"| 股价 | {s['close']:.2f}元 | 来源: {s.get('source', '?')} |")
-                lines.append(f"| PE | {s['pe_ttm']:.1f}x | |")
-                lines.append(f"| 股息率 | **{s['div_yield']:.2f}%** | S1={s['s1_div']}/30: {s.get('r1','')} |")
-                lines.append(f"| 股债息差 | **{s['bond_spread_bp']:.0f}BP** | S2={s['s2_spread']}/25: {s.get('r2','')} |")
-                lines.append(f"| 等效分红 | **{s['eff_yield']:.2f}%** | S3={s['s3_eff']}/20: {s.get('r3','')} |")
-                lines.append(f"| 确定性 | {s.get('certainty','')} | S4={s['s4_certainty']}/15: {s.get('r4','')} |")
-                lines.append(f"| ROE | {s['roe']:.1f}% | S5={s['s5_growth']}/10: {s.get('r5','')} |")
-                lines.append(f"| **总分** | **{s['total_score']:.0f}/100** | 置信度: {conf} |")
+
+                if cat == "ETF红利":
+                    # ETF 专用展示
+                    lines.append(f"| 单位净值 | {s['close']:.3f}元 | 来源: {s.get('source', '?')} |")
+                    if s.get('pe_ttm', 0) > 0:
+                        lines.append(f"| 持仓加权PE | {s['pe_ttm']:.1f}x | 前10大持仓加权 |")
+                    lines.append(f"| 股息率 | **{s['div_yield']:.2f}%** | S1={s['s1_div']}/30: {s.get('r1','')} |")
+                    lines.append(f"| 股债息差 | **{s['bond_spread_bp']:.0f}BP** | S2={s['s2_spread']}/25: {s.get('r2','')} |")
+                    lines.append(f"| 等效分红 | **{s['eff_yield']:.2f}%** | S3={s['s3_eff']}/20: {s.get('r3','')} |")
+                    lines.append(f"| 确定性 | {s.get('certainty','')} | S4={s['s4_certainty']}/15: {s.get('r4','')} |")
+                    if s.get('roe', 0) > 0:
+                        lines.append(f"| 持仓加权ROE | {s['roe']:.1f}% | S5={s['s5_growth']}/10: {s.get('r5','')} |")
+                    else:
+                        lines.append(f"| 成长性 | — | S5={s['s5_growth']}/10: {s.get('r5','')} |")
+                    lines.append(f"| **总分** | **{s['total_score']:.0f}/100** | 置信度: {conf} |")
+                else:
+                    # 个股展示
+                    lines.append(f"| 股价 | {s['close']:.2f}元 | 来源: {s.get('source', '?')} |")
+                    lines.append(f"| PE | {s['pe_ttm']:.1f}x | |")
+                    lines.append(f"| 股息率 | **{s['div_yield']:.2f}%** | S1={s['s1_div']}/30: {s.get('r1','')} |")
+                    lines.append(f"| 股债息差 | **{s['bond_spread_bp']:.0f}BP** | S2={s['s2_spread']}/25: {s.get('r2','')} |")
+                    lines.append(f"| 等效分红 | **{s['eff_yield']:.2f}%** | S3={s['s3_eff']}/20: {s.get('r3','')} |")
+                    lines.append(f"| 确定性 | {s.get('certainty','')} | S4={s['s4_certainty']}/15: {s.get('r4','')} |")
+                    lines.append(f"| ROE | {s['roe']:.1f}% | S5={s['s5_growth']}/10: {s.get('r5','')} |")
+                    lines.append(f"| **总分** | **{s['total_score']:.0f}/100** | 置信度: {conf} |")
                 lines.append("")
 
                 # ── 历史股息率横向对比 ──
-                hist_table = self._get_dividend_history_table(ts_code, bond_yield)
+                if cat == "ETF红利":
+                    hist_table = self._get_etf_dividend_history_table(ts_code, bond_yield)
+                else:
+                    hist_table = self._get_dividend_history_table(ts_code, bond_yield)
                 if hist_table:
                     lines.append("**历年股息率横向对比**\n")
                     lines.append(hist_table)

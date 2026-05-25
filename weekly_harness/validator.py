@@ -273,7 +273,12 @@ class WeeklyValidator:
             code_alerts: List[Dict] = []
 
             # 1. 范围检查
+            # ETF 类别跳过 pe_ttm/roe 的范围检查（ETF无个股PE/ROE，持仓加权值可能有偏差）
+            category = score.get("category", "")
+            skip_fields_for_etf = {"pe_ttm", "roe", "pb"}
             for field in ["div_yield", "pe_ttm", "roe", "close", "bond_spread_bp"]:
+                if category == "ETF红利" and field in skip_fields_for_etf:
+                    continue
                 val = score.get(field)
                 if val is not None:
                     alert = self._check_range(ts_code, name, field, float(val))

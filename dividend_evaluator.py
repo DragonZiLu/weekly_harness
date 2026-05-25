@@ -106,6 +106,11 @@ COMPANIES = {
         "格力电器": {"ts_code": "000651.SZ", "category": "消费成长红利", "certainty": "B+",
                    "moat": "空调技术领先·高分红传统", "comment": "分红率高，回购力度增加"},
     },
+    # ── 第四类：ETF红利 ────────────────────────────────
+    "ETF": {
+        "易方达红利ETF": {"ts_code": "515180.SH", "category": "ETF红利", "certainty": "AA",
+                   "moat": "跟踪中证红利指数·分散投资低费率", "comment": "中证红利低换手策略，适合长期攒股"},
+    },
     # ── 第三类：周期资源红利 ─────────────────────────────────
     "矿业": {
         "紫金矿业": {"ts_code": "601899.SH", "category": "周期资源红利", "certainty": "B+",
@@ -301,6 +306,14 @@ FALLBACK_DATA = {
         "buyback_yield": 0.0, "revenue_growth": 0.6, "net_profit_growth": -0.4,
         "payout_ratio": 72.0, "total_mv": 7550.0,
         "note": "2025年报：营收3448亿+0.6%，归母净利润586亿-0.4%，全年分红2.22元/股(中1.11+年报1.11)，股息率约5.8%；煤电运一体化龙头，分红率超70%"
+    },
+    "515180.SH": {  # 易方达中证红利ETF
+        "close": 1.396, "pe_ttm": 27.6, "pb": 0.0,
+        "div_yield": 4.37,
+        "roe": 9.9, "dps_latest": 0.0,
+        "buyback_yield": 0.0, "revenue_growth": 0.0, "net_profit_growth": 0.0,
+        "payout_ratio": 0.0, "total_mv": 125.0,
+        "note": "易方达中证红利ETF(515180)，跟踪中证红利指数，规模约125亿，管理费0.15%/年，持仓加权PE=27.6x，ROE=9.9%"
     },
     "601225.SH": {  # 陕西煤业
         # 网络验证：中国银河2026-05-11明确"当前收盘价对应股息率为4.0%，2025年每股分红0.948元"
@@ -510,6 +523,187 @@ class TushareDataFetcher:
         )
         return df
 
+    # ── ETF 专用方法 ──────────────────────────────────────────
+
+    def get_etf_daily(self, ts_code: str) -> Optional[Dict]:
+        """获取 ETF 最新净值/行情"""
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
+
+        df = self._safe_call(
+            "fund_daily",
+            ts_code=ts_code,
+            start_date=start_date,
+            end_date=end_date,
+            fields="ts_code,trade_date,close,pre_close,change,pct_chg"
+        )
+        if df is None or df.empty:
+            return None
+
+        df = df.sort_values("trade_date", ascending=False)
+        row = df.iloc[0]
+        return {
+            "close": float(row.get("close", 0) or 0),
+            "trade_date": str(row.get("trade_date", "")),
+        }
+
+    def get_etf_dividend(self, ts_code: str, close: float) -> Optional[float]:
+        """
+        从 fund_div 接口获取 ETF 分红数据，计算股息率
+
+        逻辑：取最近一次年度分红的每份分红金额，除以当前净值
+        fund_div 的关键字段：ex_date(除息日), div_cash(每份分红金额)
+        """
+        if close <= 0:
+            return None
+
+        df = self._safe_call(
+            "fund_div",
+            ts_code=ts_code,
+        )
+        if df is None or df.empty:
+            return None
+
+        df["div_cash"] = pd.to_numeric(df["div_cash"], errors="coerce").fillna(0)
+        df = df[df["div_cash"] > 0]
+        if df.empty:
+            return None
+
+        # 用 ex_date 提取年份（除息日最能代表分红归属年度）
+        df["ex_date"] = df["ex_date"].astype(str)
+        df = df[df["ex_date"].str.len() >= 4]  # 过滤空值
+
+        # 去重：同一 ex_date 只保留一条（fund_div 可能对同一笔分红存多条记录）
+        df = df.drop_duplicates(subset=["ex_date"], keep="first")
+
+        df["year"] = df["ex_date"].str[:4]
+
+        # 按年度汇总
+        year_sums = df.groupby("year")["div_cash"].sum()
+
+        # 取最近两年中有分红的一年
+        current_year = str(datetime.now().year)
+        prev_year = str(datetime.now().year - 1)
+
+        target_year = None
+        for year in [current_year, prev_year]:
+            if year in year_sums and year_sums[year] > 0:
+                target_year = year
+                break
+
+        if target_year is None:
+            return None
+
+        total_div = year_sums[target_year]
+        if total_div <= 0:
+            return None
+
+        # ETF 的 close 是净值（元），div_cash 也是每份金额（元）
+        div_yield = round(total_div / close * 100, 4)
+        return div_yield
+
+    def get_etf_weighted_metrics(self, ts_code: str) -> Optional[Dict]:
+        """
+        通过 ETF 持仓加权计算 PE/ROE
+
+        取最新一期前 10 大持仓，按持仓占比加权 PE/ROE
+        """
+        # 1. 获取持仓
+        df = self._safe_call(
+            "fund_portfolio",
+            ts_code=ts_code,
+        )
+        if df is None or df.empty:
+            return None
+
+        # 取最新一期
+        latest = df["end_date"].max()
+        df_latest = df[df["end_date"] == latest].copy()
+
+        # 按持仓占比排序，取前 10
+        df_latest = df_latest.sort_values("stk_mkv_ratio", ascending=False).head(10)
+        if df_latest.empty:
+            return None
+
+        # 2. 逐个获取持仓 PE/ROE
+        weighted_pe = 0.0
+        weighted_roe = 0.0
+        total_weight_pe = 0.0
+        total_weight_roe = 0.0
+        holdings_info = []
+
+        for _, row in df_latest.iterrows():
+            symbol = row["symbol"]
+            weight = float(row.get("stk_mkv_ratio", 0) or 0)
+            if weight <= 0:
+                continue
+
+            # 获取 PE
+            try:
+                time.sleep(0.15)
+                bdf = self._safe_call(
+                    "daily_basic",
+                    ts_code=symbol,
+                    fields="ts_code,trade_date,pe_ttm"
+                )
+                pe = 0.0
+                if bdf is not None and not bdf.empty:
+                    pe = float(bdf.iloc[0].get("pe_ttm", 0) or 0)
+                if pe and pe > 0:
+                    weighted_pe += pe * weight
+                    total_weight_pe += weight
+            except Exception:
+                pass
+
+            # 获取 ROE
+            try:
+                time.sleep(0.15)
+                fdf = self._safe_call(
+                    "fina_indicator",
+                    ts_code=symbol,
+                    fields="ts_code,ann_date,end_date,roe"
+                )
+                roe = 0.0
+                if fdf is not None and not fdf.empty:
+                    fdf = fdf.sort_values("ann_date", ascending=False)
+                    # 优先年报
+                    annual = fdf[fdf["end_date"].astype(str).str.endswith("1231")]
+                    if not annual.empty:
+                        roe = float(annual.iloc[0].get("roe", 0) or 0)
+                    else:
+                        roe_raw = float(fdf.iloc[0].get("roe", 0) or 0)
+                        end_d = str(fdf.iloc[0].get("end_date", ""))
+                        if end_d.endswith("0331"):
+                            roe = roe_raw * 4
+                        elif end_d.endswith("0630"):
+                            roe = roe_raw * 2
+                        elif end_d.endswith("0930"):
+                            roe = roe_raw * 4 / 3
+                        else:
+                            roe = roe_raw
+                if roe and roe > 0:
+                    weighted_roe += roe * weight
+                    total_weight_roe += weight
+            except Exception:
+                pass
+
+            holdings_info.append(f"{symbol}({weight:.1f}%)")
+
+        result = {}
+        result["holdings_desc"] = f"前{len(holdings_info)}大持仓: " + ", ".join(holdings_info[:5])
+
+        if total_weight_pe > 0:
+            result["pe_ttm"] = round(weighted_pe / total_weight_pe, 1)
+        else:
+            result["pe_ttm"] = 0.0
+
+        if total_weight_roe > 0:
+            result["roe"] = round(weighted_roe / total_weight_roe, 1)
+        else:
+            result["roe"] = 0.0
+
+        return result
+
     def get_repurchase(self, ts_code: str) -> Optional[pd.DataFrame]:
         """获取回购记录"""
         df = self._safe_call(
@@ -542,9 +736,13 @@ class DividendCycleEvaluator:
         self.fetcher = TushareDataFetcher()
         self.results: List[Dict] = []
 
-    def _get_company_data(self, name: str, ts_code: str) -> Dict:
+    def _get_company_data(self, name: str, ts_code: str, category: str = "") -> Dict:
         """获取单只股票数据（tushare优先，fallback补充）"""
         print(f"  📊 获取 {name} ({ts_code}) 数据...", end=" ")
+
+        # ── ETF 专用数据获取 ──
+        if category == "ETF红利":
+            return self._get_etf_data(name, ts_code)
 
         # Step 1: tushare 实时数据
         basic = self.fetcher.get_daily_basic(ts_code)
@@ -623,6 +821,80 @@ class DividendCycleEvaluator:
 
         return data
 
+    def _get_etf_data(self, name: str, ts_code: str) -> Dict:
+        """ETF 专用数据获取（fund_daily + fund_div + fund_portfolio加权PE/ROE）"""
+        fallback = FALLBACK_DATA.get(ts_code, {})
+        data = {}
+
+        # 1. 行情数据：fund_daily 获取净值
+        etf_daily = self.fetcher.get_etf_daily(ts_code)
+        if etf_daily:
+            data["close"] = etf_daily["close"]
+            data["trade_date"] = etf_daily["trade_date"]
+            data["source_basic"] = "tushare(fund_daily)"
+            print(f"✅ 净值", end=" ")
+        else:
+            data["close"] = fallback.get("close", 0)
+            data["trade_date"] = "fallback"
+            data["source_basic"] = "fallback"
+            print(f"⚠️fallback净值", end=" ")
+
+        # 2. 股息率：fund_div 接口
+        close_price = data.get("close", 0)
+        fallback_div = fallback.get("div_yield", 0)
+        etf_div = self.fetcher.get_etf_dividend(ts_code, close_price) if close_price > 0 else None
+
+        if etf_div and etf_div >= 0.3:
+            data["div_yield"] = etf_div
+            data["source_basic"] += "(div=fund_div)"
+            print(f"✅ 股息率={etf_div:.2f}%", end=" ")
+        else:
+            if fallback_div > 0:
+                data["div_yield"] = fallback_div
+                data["source_basic"] += "(div=fallback)"
+            else:
+                data["div_yield"] = 0.0
+            print(f"⚠️ 股息率fallback={data['div_yield']:.2f}%", end=" ")
+
+        # ETF 透传字段
+        data["_div_self_calc"] = round(etf_div, 4) if etf_div else None
+        data["_div_dv_ttm"] = None  # ETF 无 dv_ttm
+        data["_div_fallback"] = round(fallback_div, 4) if fallback_div else None
+        data["_close_fallback"] = fallback.get("close", None)
+
+        # 3. PE/ROE：持仓加权计算
+        etf_metrics = self.fetcher.get_etf_weighted_metrics(ts_code)
+        if etf_metrics:
+            data["pe_ttm"] = etf_metrics.get("pe_ttm", 0)
+            data["roe"] = etf_metrics.get("roe", 0)
+            data["source_fina"] = "tushare(持仓加权)"
+            data["note"] = etf_metrics.get("holdings_desc", "")
+            print(f"✅ 持仓加权PE={data['pe_ttm']:.1f} ROE={data['roe']:.1f}%", end=" ")
+        else:
+            data["pe_ttm"] = fallback.get("pe_ttm", 0)
+            data["roe"] = fallback.get("roe", 0)
+            data["source_fina"] = "fallback"
+            data["note"] = fallback.get("note", "")
+            print(f"⚠️fallback PE/ROE", end=" ")
+
+        # ETF 无意义的字段填充 0
+        data["pb"] = 0.0
+        data["net_profit_growth"] = 0.0
+        data["revenue_growth"] = 0.0
+        data["dps_latest"] = 0.0
+        data["total_mv"] = fallback.get("total_mv", 0)
+        data["buyback_yield"] = 0.0
+        data["payout_ratio"] = 0.0
+
+        # 补充 note
+        if not data.get("note"):
+            data["note"] = fallback.get("note", "")
+        elif fallback.get("note"):
+            data["note"] = data["note"] + " | " + fallback["note"]
+
+        print()  # 换行
+        return data
+
     # ──────────────── 评分函数 ────────────────────────────────
 
     def score_dividend_yield(self, div_yield: float, category: str) -> Tuple[float, str]:
@@ -651,6 +923,18 @@ class DividendCycleEvaluator:
                 return 18, f"★★★ {div_yield:.1f}% 合理"
             elif div_yield >= 2.0:
                 return 10, f"★★ {div_yield:.1f}% 偏低，需回购补足"
+            else:
+                return 4, f"★ {div_yield:.1f}% 过低"
+        elif category == "ETF红利":
+            # ETF 红利：类似弱周期，但标准略低
+            if div_yield >= 5.0:
+                return 28, f"★★★★★ {div_yield:.1f}% ETF高股息"
+            elif div_yield >= 4.0:
+                return 24, f"★★★★ {div_yield:.1f}% 较高"
+            elif div_yield >= 3.0:
+                return 18, f"★★★ {div_yield:.1f}% 合理"
+            elif div_yield >= 2.0:
+                return 10, f"★★ {div_yield:.1f}% 偏低"
             else:
                 return 4, f"★ {div_yield:.1f}% 过低"
         else:  # 周期资源红利
@@ -697,6 +981,16 @@ class DividendCycleEvaluator:
                 return 12, f"等效分红 {eff_yield:.1f}% 低于目标，需提升"
             else:
                 return 5, f"等效分红 {eff_yield:.1f}% 显著低于目标"
+        elif category == "ETF红利":
+            # ETF 红利：类似弱周期
+            if eff_yield >= 7.0:
+                return 20, f"等效分红 {eff_yield:.1f}% 极高"
+            elif eff_yield >= 5.5:
+                return 16, f"等效分红 {eff_yield:.1f}% 高"
+            elif eff_yield >= 4.0:
+                return 11, f"等效分红 {eff_yield:.1f}% 合理"
+            else:
+                return 5, f"等效分红 {eff_yield:.1f}% 偏低"
         else:
             # 其他类：单纯现金股息
             if eff_yield >= 7.0:
@@ -743,6 +1037,9 @@ class DividendCycleEvaluator:
                 return 5, f"ROE {roe:.1f}% 可接受"
             else:
                 return 3, f"ROE {roe:.1f}% 偏低"
+        elif category == "ETF红利":
+            # ETF 没有 ROE，给一个基于指数成长性的默认分数
+            return 7, f"ETF 跟踪中证红利指数，成分股平均ROE约10-12%"
         else:  # 消费成长
             if roe >= 25 and net_profit_growth >= 10:
                 return 10, f"ROE {roe:.1f}% 强劲增长 {net_profit_growth:.1f}%"
@@ -777,7 +1074,7 @@ class DividendCycleEvaluator:
         moat = meta["moat"]
 
         # 获取数据
-        data = self._get_company_data(name, ts_code)
+        data = self._get_company_data(name, ts_code, category=category)
 
         # 评分
         s1, r1 = self.score_dividend_yield(data["div_yield"], category)
@@ -984,7 +1281,7 @@ class ReportGenerator:
         self.output_dir.mkdir(exist_ok=True)
 
     def _category_emoji(self, category: str) -> str:
-        return {"弱周期红利": "💧", "消费成长红利": "📦", "周期资源红利": "⛏️"}.get(category, "📊")
+        return {"弱周期红利": "💧", "消费成长红利": "📦", "周期资源红利": "⛏️", "ETF红利": "📈"}.get(category, "📊")
 
     def generate_markdown(self) -> str:
         """生成 Markdown 报告"""
@@ -1010,10 +1307,11 @@ class ReportGenerator:
             )
 
         # 分类详情
-        categories_order = ["弱周期红利", "消费成长红利", "周期资源红利"]
+        categories_order = ["弱周期红利", "消费成长红利", "周期资源红利", "ETF红利"]
         cat_labels = {"弱周期红利": "第一类：弱周期红利（最优先）",
                       "消费成长红利": "第二类：消费/成长红利（中等难度）",
-                      "周期资源红利": "第三类：周期资源红利（最高难度）"}
+                      "周期资源红利": "第三类：周期资源红利（最高难度）",
+                      "ETF红利": "第四类：ETF红利（分散投资）"}
 
         for cat in categories_order:
             cat_results = [r for r in self.results if r["category"] == cat]
@@ -1101,6 +1399,7 @@ class ReportGenerator:
             "弱周期红利": "#4ecdc4",
             "消费成长红利": "#f9ca24",
             "周期资源红利": "#e17055",
+            "ETF红利": "#a29bfe",  # 紫色
         }
         bar_colors = [colors_cat.get(c, "#gray") for c in df["category"]]
 
@@ -1250,11 +1549,12 @@ class ReportGenerator:
         print("  🏆 红利周期投资 — 企业评估综合排行榜")
         print("=" * 65)
 
-        cat_order = ["弱周期红利", "消费成长红利", "周期资源红利"]
+        cat_order = ["弱周期红利", "消费成长红利", "周期资源红利", "ETF红利"]
         cat_labels = {
             "弱周期红利": "💧 第一类：弱周期红利",
             "消费成长红利": "📦 第二类：消费成长红利",
             "周期资源红利": "⛏️  第三类：周期资源红利",
+            "ETF红利": "📈 第四类：ETF红利",
         }
 
         for cat in cat_order:
