@@ -6,13 +6,20 @@ Backtest — 回测引擎
 回测流程：
   1. 加载历史评分数据（weekly_history.csv）或用模拟评分
   2. 获取历史价格数据（tushare daily/fund_daily）
-  3. 按周逐步模拟：计算评分 → 生成调仓指令 → 执行交易 → 记录净值
+  3. 按季度逐步模拟：计算评分 → 生成调仓指令 → 执行交易 → 记录净值
   4. 计算策略绩效指标（年化收益、最大回撤、夏普比率等）
   5. 与基准对比（沪深300 / 中证红利）
 
+调仓频率：
+  - quarterly (默认): 每季度末最后一个交易日调仓
+  - weekly: 每周五调仓
+
 使用方法：
-  # 用 weekly_history.csv 回测
+  # 季度调仓回测（默认）
   python -m weekly_harness.backtest --start 2024-01-01 --end 2026-05-01
+
+  # 周度调仓回测
+  python -m weekly_harness.backtest --start 2024-01-01 --freq weekly
 
   # 指定参数
   python -m weekly_harness.backtest --start 2024-01-01 --cash 50万 --max-weight 0.12
@@ -181,11 +188,138 @@ class BacktestDataFetcher:
         return pd.DataFrame()
 
     def get_friday_dates(self, start_date: str, end_date: str) -> List[str]:
-        """获取回测期间的所有周五日期（调仓日）"""
+        """获取回测期间的所有周五日期（周度调仓日）"""
         start = pd.Timestamp(start_date)
         end = pd.Timestamp(end_date)
         fridays = pd.date_range(start=start, end=end, freq="W-FRI")
         return [d.strftime("%Y-%m-%d") for d in fridays]
+
+    def get_quarter_end_dates(self, start_date: str, end_date: str) -> List[str]:
+        """
+        获取回测期间的所有季度末最后一个周五日期（季度调仓日）
+
+        季度末月份: 3月、6月、9月、12月
+        取每个季度末月份的最后一个周五作为调仓日
+        """
+        start = pd.Timestamp(start_date)
+        end = pd.Timestamp(end_date)
+        dates = []
+
+        # 生成季度末月份
+        current = start
+        while current <= end:
+            # 找到当前/下一个季度末月份
+            month = current.month
+            if month <= 3:
+                q_end_month = 3
+            elif month <= 6:
+                q_end_month = 6
+            elif month <= 9:
+                q_end_month = 9
+            else:
+                q_end_month = 12
+
+            q_end_year = current.year
+            # 如果季度末月份已过，跳到下一季度
+            if pd.Timestamp(q_end_year, q_end_month, 1) < start:
+                if q_end_month == 12:
+                    q_end_year += 1
+                    q_end_month = 3
+                else:
+                    q_end_month += 3
+
+            # 该季度末月份的最后一天
+            if q_end_month == 12:
+                next_month = pd.Timestamp(q_end_year + 1, 1, 1)
+            else:
+                next_month = pd.Timestamp(q_end_year, q_end_month + 1, 1)
+            month_end = next_month - pd.Timedelta(days=1)
+
+            # 找该月最后一个周五
+            fridays_in_month = pd.date_range(
+                start=pd.Timestamp(q_end_year, q_end_month, 1),
+                end=month_end,
+                freq="W-FRI",
+            )
+            if not fridays_in_month.empty:
+                last_friday = fridays_in_month[-1]
+                if start <= last_friday <= end:
+                    dates.append(last_friday.strftime("%Y-%m-%d"))
+
+            # 移到下一季度
+            if q_end_month == 12:
+                current = pd.Timestamp(q_end_year + 1, 1, 1)
+            else:
+                current = pd.Timestamp(q_end_year, q_end_month + 1, 1)
+
+        return dates
+
+    def fetch_dividend_data(
+        self,
+        ts_code: str,
+        start_date: str,
+        end_date: str,
+        is_etf: bool = False,
+    ) -> pd.DataFrame:
+        """
+        获取历史分红数据
+
+        Returns
+        -------
+        DataFrame with columns: ts_code, ex_date, cash_per_share (每股派现, 税前)
+        """
+        pro = self._get_tushare_pro()
+
+        try:
+            if is_etf:
+                # ETF 分红用 fund_div 接口，字段名 div_cash
+                df = pro.fund_div(ts_code=ts_code)
+            else:
+                # 个股分红用 dividend 接口，字段名 cash_div
+                df = pro.dividend(
+                    ts_code=ts_code,
+                    fields="ts_code,end_date,div_proc,cash_div,ann_date,ex_date",
+                )
+
+            time.sleep(0.15)  # 限流
+
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            # 筛选实施完成的分红
+            if "div_proc" in df.columns:
+                df = df[df["div_proc"] == "实施"]
+
+            # 去重（ETF同一天可能有多条重复记录）
+            if "ex_date" in df.columns:
+                df = df.drop_duplicates(subset=["ex_date"])
+
+            # 统一现金分红字段名 → cash_per_share
+            if "cash_div" in df.columns:
+                df = df.rename(columns={"cash_div": "cash_per_share"})
+            elif "div_cash" in df.columns:
+                df = df.rename(columns={"div_cash": "cash_per_share"})
+            else:
+                return pd.DataFrame()
+
+            # 只保留现金分红记录
+            df = df[df["cash_per_share"] > 0]
+
+            # 筛选在回测期间的分红（用 ex_date）
+            if "ex_date" in df.columns:
+                df["ex_date"] = df["ex_date"].astype(str)
+                df = df[
+                    (df["ex_date"] >= start_date.replace("-", ""))
+                    & (df["ex_date"] <= end_date.replace("-", ""))
+                ]
+
+            if df.empty:
+                return pd.DataFrame()
+
+            return df[["ts_code", "ex_date", "cash_per_share"]].reset_index(drop=True)
+
+        except Exception:
+            return pd.DataFrame()
 
 
 # ─── 回测引擎 ──────────────────────────────────────────────────
@@ -194,7 +328,7 @@ class BacktestEngine:
     """
     回测引擎
 
-    按周逐步模拟红利周期轮动策略的执行。
+    支持季度调仓（默认）和周度调仓。
     """
 
     def __init__(
@@ -203,15 +337,18 @@ class BacktestEngine:
         initial_cash: float = 100_0000,
         commission_rate: float = 0.001,
         slippage: float = 0.001,
+        rebalance_freq: str = "quarterly",
     ):
         self.strategy = DividendCycleStrategy(strategy_params)
         self.portfolio = Portfolio(
             initial_cash=initial_cash,
             commission_rate=commission_rate,
             slippage=slippage,
+            dividend_reinvest=True,
         )
         self.fetcher = BacktestDataFetcher()
         self.metrics = PerformanceMetrics()
+        self.rebalance_freq = rebalance_freq  # "quarterly" or "weekly"
 
         # 股票元数据
         self._stock_meta: Dict[str, Dict] = {}
@@ -219,6 +356,10 @@ class BacktestEngine:
         self._price_data: Dict[str, pd.DataFrame] = {}
         # 基准数据
         self._benchmark: Optional[pd.DataFrame] = None
+        # 分红数据 {ts_code: DataFrame}
+        self._dividend_data: Dict[str, pd.DataFrame] = {}
+        # 已处理的分红 (ts_code, ex_date) 防止重复
+        self._processed_dividends: set = set()
 
     def _load_stock_meta(self):
         """加载股票元数据（从 dividend_evaluator）"""
@@ -252,6 +393,67 @@ class BacktestEngine:
                 print(f"✅ {len(df)} 条")
             else:
                 print("⚠️ 无数据")
+
+    def _fetch_all_dividends(self, start_date: str, end_date: str):
+        """预获取所有标的分红数据"""
+        print("\n  💰 预获取历史分红数据...")
+        for ts_code, meta in self._stock_meta.items():
+            df = self.fetcher.fetch_dividend_data(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                is_etf=meta.get("is_etf", False),
+            )
+            if not df.empty:
+                self._dividend_data[ts_code] = df
+                total_div = df["cash_per_share"].sum()
+                print(f"    {meta['name']} ({ts_code}): {len(df)} 次分红, 累计每股 {total_div:.3f} 元")
+
+    def _process_dividends(self, date_str: str):
+        """
+        处理到当前日期为止的分红事件
+
+        在每次调仓日调用，检查是否有除权日在上次调仓到本次调仓之间的分红
+        红利税规则：持股 >1年免税, >1个月10%, ≤1个月20%
+        回测默认按免税计算（季度调仓天然持股>1年）
+        """
+        for ts_code, div_df in self._dividend_data.items():
+            if div_df.empty:
+                continue
+
+            meta = self._stock_meta.get(ts_code, {})
+            name = meta.get("name", ts_code)
+
+            for _, row in div_df.iterrows():
+                # 除权日（ex_date 或 end_date）
+                ex_date_str = str(row.get("ex_date", row.get("end_date", "")))
+                if not ex_date_str or len(ex_date_str) < 8:
+                    continue
+
+                # 格式化日期
+                if len(ex_date_str) == 8:
+                    ex_date_fmt = f"{ex_date_str[:4]}-{ex_date_str[4:6]}-{ex_date_str[6:8]}"
+                else:
+                    continue
+
+                # 防重复
+                div_key = (ts_code, ex_date_str)
+                if div_key in self._processed_dividends:
+                    continue
+
+                # 只处理在本次调仓日之前或当日的分红
+                if ex_date_fmt <= date_str:
+                    cash_per_share = row.get("cash_per_share", 0)
+                    if cash_per_share > 0:
+                        # 红利税：季度调仓持股>1年，免税
+                        record = self.portfolio.receive_dividend(
+                            ts_code=ts_code,
+                            name=name,
+                            cash_per_share=cash_per_share,
+                            tax_rate=0.0,  # 持股>1年免税
+                        )
+                        if record:
+                            self._processed_dividends.add(div_key)
 
     def _get_price_on_date(self, ts_code: str, date_str: str) -> Optional[float]:
         """获取某只股票在指定日期的收盘价（如非交易日取最近的前一交易日）"""
@@ -455,13 +657,19 @@ class BacktestEngine:
         # 初始化
         self._load_stock_meta()
         self._fetch_all_prices(start_date, end_date)
+        self._fetch_all_dividends(start_date, end_date)
 
-        # 获取调仓日（每周五）
-        rebalance_dates = self.fetcher.get_friday_dates(start_date, end_date)
+        # 获取调仓日
+        if self.rebalance_freq == "quarterly":
+            rebalance_dates = self.fetcher.get_quarter_end_dates(start_date, end_date)
+            freq_label = "季度末"
+        else:
+            rebalance_dates = self.fetcher.get_friday_dates(start_date, end_date)
+            freq_label = "每周五"
 
         if verbose:
             print(f"\n  📅 回测期间: {start_date} ~ {end_date}")
-            print(f"  📊 调仓次数: {len(rebalance_dates)} 次（每周五）")
+            print(f"  📊 调仓频率: {freq_label}，共 {len(rebalance_dates)} 次")
             print(f"  💰 初始资金: {self.portfolio.initial_cash:,.0f} 元")
             print(f"  📋 持仓标的: {len(self._stock_meta)} 只")
 
@@ -485,6 +693,9 @@ class BacktestEngine:
             # 更新持仓价格
             self.portfolio.update_prices(prices)
 
+            # 处理分红（入账到现金）
+            self._process_dividends(date_str)
+
             # 模拟评分
             scores = self._simulate_scores_at_date(date_str)
             if not scores:
@@ -503,12 +714,15 @@ class BacktestEngine:
             # 执行调仓
             self._execute_rebalance(actions, prices)
 
+            # 记录持仓快照
+            self.portfolio.record_holding_snapshot()
+
             # 记录净值
             self.portfolio.record_nav()
 
-            if verbose and (i + 1) % 10 == 0:
+            if verbose and (i + 1) % 4 == 0:
                 ret = self.portfolio.total_return
-                print(f"  📈 第{i+1}周 ({date_str}): 总收益 {ret:+.2f}%, "
+                print(f"  📈 第{i+1}次调仓 ({date_str}): 总收益 {ret:+.2f}%, "
                       f"持仓 {len([p for p in self.portfolio.positions.values() if p.shares > 0])} 只")
 
         # 计算绩效
@@ -547,6 +761,11 @@ class BacktestEngine:
         sell_trades = len(trade_df[trade_df["action"] == "sell"]) if not trade_df.empty else 0
         total_commission = trade_df["commission"].sum() if not trade_df.empty else 0
 
+        # 红利统计
+        dividend_records = self.portfolio.dividend_records
+        total_dividend = sum(d.get("net_dividend", 0) for d in dividend_records)
+        dividend_contribution = total_dividend / self.portfolio.initial_cash * 100  # 红利贡献(%)
+
         # 基准对比
         benchmark_return = 0.0
         if self._benchmark is not None and not self._benchmark.empty:
@@ -572,7 +791,11 @@ class BacktestEngine:
             "total_commission": round(total_commission, 2),
             "benchmark_return": round(benchmark_return, 2),
             "excess_return": round(excess_return, 2),
-            "trading_weeks": trading_days,
+            "trading_periods": trading_days,
+            "rebalance_freq": self.rebalance_freq,
+            "total_dividend": round(total_dividend, 2),
+            "dividend_count": len(dividend_records),
+            "dividend_contribution": round(dividend_contribution, 2),
         }
 
         if verbose:
@@ -599,11 +822,17 @@ class BacktestEngine:
         print(f"  卡尔玛比率:   {results['calmar_ratio']:.2f}")
 
         print(f"\n  ── 交易统计 ──")
-        print(f"  交易周数:     {results['trading_weeks']}")
+        freq_label = "季度" if results.get('rebalance_freq') == 'quarterly' else "周"
+        print(f"  调仓次数:     {results['trading_periods']} 次（{freq_label}级）")
         print(f"  总交易次数:   {results['num_trades']}")
         print(f"  买入次数:     {results['buy_trades']}")
         print(f"  卖出次数:     {results['sell_trades']}")
         print(f"  总手续费:     {results['total_commission']:,.2f} 元")
+
+        print(f"\n  ── 红利收益 ──")
+        print(f"  分红次数:     {results['dividend_count']} 次")
+        print(f"  累计红利:     {results['total_dividend']:,.2f} 元")
+        print(f"  红利贡献:     {results['dividend_contribution']:.2f}%（占初始资金）")
 
         print(f"\n  ── 基准对比 ──")
         print(f"  基准收益:     {results['benchmark_return']:+.2f}%")
@@ -668,35 +897,64 @@ class BacktestEngine:
 
         # 交易统计
         lines.append("## 🔄 交易统计\n")
-        lines.append(f"- 交易周数: {results['trading_weeks']}")
+        freq_label = "季度" if results.get('rebalance_freq') == 'quarterly' else "周"
+        lines.append(f"- 调仓次数: {results['trading_periods']} 次（{freq_label}级调仓）")
         lines.append(f"- 总交易次数: {results['num_trades']} (买入{results['buy_trades']}次, 卖出{results['sell_trades']}次)")
         lines.append(f"- 总手续费: {results['total_commission']:,.2f} 元")
         lines.append("")
+
+        # ── 季度持仓明细 ──
+        snapshots = self.portfolio.holding_snapshots
+        if snapshots:
+            lines.append("## 📋 季度持仓明细\n")
+            snap_df = pd.DataFrame(snapshots)
+            for date in snap_df["date"].unique():
+                date_data = snap_df[snap_df["date"] == date]
+                # 提取季度标签
+                dt = pd.Timestamp(date)
+                q = (dt.month - 1) // 3 + 1
+                quarter_label = f"{dt.year}Q{q}"
+                lines.append(f"### {quarter_label}（{date[:10]}）\n")
+                total_val = date_data.iloc[0]["total_value"]
+                cash = date_data.iloc[0]["cash"]
+                lines.append(f"- 总资产: {total_val:,.0f} 元 | 现金: {cash:,.0f} 元\n")
+                lines.append("| 标的 | 类别 | 股数 | 成本 | 现价 | 市值 | 权重 | 盈亏 |")
+                lines.append("|------|------|------|------|------|------|------|------|")
+                for _, row in date_data.iterrows():
+                    lines.append(
+                        f"| {row['name']} | {row['category']} | {row['shares']} | "
+                        f"{row['cost_price']:.3f} | {row['current_price']:.3f} | "
+                        f"{row['market_value']:,.0f} | {row['weight']:.1f}% | "
+                        f"{row['profit_pct']:+.1f}% |"
+                    )
+                lines.append("")
+
+        # ── 全量交易明细 ──
+        if not trade_df.empty:
+            lines.append("## 📋 全量交易明细\n")
+            lines.append("| 日期 | 标的 | 动作 | 价格 | 数量 | 金额 | 手续费 | 理由 |")
+            lines.append("|------|------|------|------|------|------|--------|------|")
+            for _, row in trade_df.iterrows():
+                action_str = "🟢买入" if row["action"] == "buy" else "🔴卖出"
+                reason = row.get("reason", "")
+                lines.append(
+                    f"| {row['date'][:10]} | {row['name']} | {action_str} | "
+                    f"{row['price']:.2f} | {row['shares']} | {row['amount']:,.0f} | "
+                    f"{row['commission']:.0f} | {reason} |"
+                )
+            lines.append("")
 
         # 净值曲线数据
         if not nav_df.empty:
             lines.append("## 📉 净值曲线\n")
             lines.append("| 日期 | 总资产 | 收益率 | 持仓数 |")
             lines.append("|------|--------|--------|--------|")
-            # 每4周取一条
-            for i, row in nav_df.iloc[::4].iterrows():
+            # 每次调仓取一条（季度调仓则每条都取，周度调仓则每4周取一条）
+            step = 4 if self.rebalance_freq == "weekly" else 1
+            for i, row in nav_df.iloc[::step].iterrows():
                 lines.append(
                     f"| {row['date'][:10]} | {row['total_value']:,.0f} | "
                     f"{row['total_return']:+.2f}% | {row['num_positions']} |"
-                )
-            lines.append("")
-
-        # 交易明细（最近20笔）
-        if not trade_df.empty:
-            lines.append("## 📋 交易明细（最近20笔）\n")
-            lines.append("| 日期 | 标的 | 动作 | 价格 | 数量 | 金额 | 手续费 |")
-            lines.append("|------|------|------|------|------|------|--------|")
-            for _, row in trade_df.tail(20).iterrows():
-                action_str = "🟢买入" if row["action"] == "buy" else "🔴卖出"
-                lines.append(
-                    f"| {row['date'][:10]} | {row['name']} | {action_str} | "
-                    f"{row['price']:.2f} | {row['shares']} | {row['amount']:,.0f} | "
-                    f"{row['commission']:.0f} |"
                 )
             lines.append("")
 
@@ -715,10 +973,17 @@ class BacktestEngine:
             nav_df.to_csv(nav_path, index=False, encoding="utf-8")
             print(f"  💾 净值曲线 → {nav_path}")
 
-        # 保存交易记录
+        # 保存全量交易记录
         if not trade_df.empty:
             trade_path = output_dir / "trade_log.csv"
             trade_df.to_csv(trade_path, index=False, encoding="utf-8")
             print(f"  💾 交易记录 → {trade_path}")
+
+        # 保存季度持仓明细
+        if snapshots:
+            snap_df = pd.DataFrame(snapshots)
+            holding_path = output_dir / "holding_snapshots.csv"
+            snap_df.to_csv(holding_path, index=False, encoding="utf-8")
+            print(f"  💾 持仓明细 → {holding_path}")
 
         return content

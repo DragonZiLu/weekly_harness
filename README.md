@@ -1,6 +1,6 @@
 # 红利周期投资 — 周度量化评估系统
 
-基于**红利周期三层估值体系**的 A 股红利股周度自动评估工具，支持**周度调仓**和**策略回测**。
+基于**红利周期三层估值体系**的 A 股红利股周度自动评估工具，支持**季度调仓**和**策略回测**。
 
 ## 项目结构
 
@@ -40,11 +40,14 @@ cp .env.example .env
 # 3. 运行周度评估
 python run_weekly.py
 
-# 4. 生成当周调仓计划
+# 4. 生成当季调仓计划
 python run_backtest.py --plan-only
 
-# 5. 运行策略回测
+# 5. 运行策略回测（默认季度调仓）
 python run_backtest.py --start 2024-01-01 --end 2026-05-01
+
+# 6. 周度调仓回测
+python run_backtest.py --start 2024-01-01 --freq weekly
 ```
 
 ## 自动化（cron）
@@ -108,8 +111,11 @@ Planner → Generator → Validator → Reporter
 ### 回测参数
 
 ```bash
-# 默认参数
+# 默认参数（季度调仓）
 python run_backtest.py --start 2024-01-01
+
+# 周度调仓
+python run_backtest.py --start 2024-01-01 --freq weekly
 
 # 自定义仓位
 python run_backtest.py --max-weight 12 --mid-weight 8 --min-weight 3

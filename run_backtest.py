@@ -3,16 +3,19 @@ run_backtest.py — 红利周期轮动策略回测入口
 ==========================================
 
 使用方法：
-  # 默认回测（100万，2024-01-01 至今）
+  # 默认回测（100万，2024-01-01 至今，季度调仓）
   python run_backtest.py
 
   # 自定义参数
   python run_backtest.py --start 2023-01-01 --end 2026-05-01 --cash 500000
 
+  # 周度调仓回测
+  python run_backtest.py --freq weekly
+
   # 调整仓位参数
   python run_backtest.py --max-weight 0.12 --mid-weight 0.08
 
-  # 仅生成当周调仓计划（不回测）
+  # 仅生成当季调仓计划（不回测）
   python run_backtest.py --plan-only
 """
 
@@ -54,6 +57,7 @@ def run_backtest(args):
         initial_cash=args.cash,
         commission_rate=args.commission / 100,
         slippage=args.slippage / 100,
+        rebalance_freq=args.freq,
     )
 
     start_time = time.time()
@@ -76,7 +80,7 @@ def run_backtest(args):
 def run_plan_only(args):
     """仅生成当周调仓计划（不执行回测）"""
     print("\n" + "=" * 70)
-    print("  📋 红利周期轮动策略 — 当周调仓计划")
+    print("  📋 红利周期轮动策略 — 当季调仓计划")
     print(f"  📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 70)
 
@@ -115,13 +119,16 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 示例:
-  # 默认回测
+  # 默认回测（季度调仓）
   python run_backtest.py
+
+  # 周度调仓回测
+  python run_backtest.py --freq weekly
 
   # 自定义回测期间
   python run_backtest.py --start 2023-06-01 --end 2026-05-01
 
-  # 仅生成当周调仓计划
+  # 仅生成当季调仓计划
   python run_backtest.py --plan-only
 
   # 调整仓位参数
@@ -134,6 +141,8 @@ def main():
     parser.add_argument("--end", default=datetime.now().strftime("%Y-%m-%d"), help="回测结束日期 (默认: 今天)")
     parser.add_argument("--cash", type=float, default=1000000, help="初始资金 (默认: 100万)")
     parser.add_argument("--benchmark", default="000300.SH", help="基准指数 (默认: 沪深300)")
+    parser.add_argument("--freq", default="quarterly", choices=["quarterly", "weekly"],
+                        help="调仓频率: quarterly=季度, weekly=周度 (默认: quarterly)")
 
     # 策略参数
     parser.add_argument("--max-weight", type=float, default=15, help="大胆攒股单标的权重%% (默认: 15)")

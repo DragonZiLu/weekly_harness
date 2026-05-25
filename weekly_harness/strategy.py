@@ -1,10 +1,10 @@
 """
 Strategy — 红利周期轮动策略
 ============================
-基于红利周期评分的周度调仓策略。
+基于红利周期评分的季度调仓策略。
 
 策略核心：
-  1. 每周五收盘后运行 DividendCycleEvaluator，获取所有标的评分
+  1. 每季度末运行 DividendCycleEvaluator，获取所有标的评分
   2. 根据评分决定目标仓位权重
   3. 考虑类别分散化约束
   4. 生成调仓指令（买入/卖出/持有）
@@ -28,7 +28,7 @@ Strategy — 红利周期轮动策略
 调仓触发条件：
   - 评分跨过阈值（如从65降到64，需减仓）
   - 当前权重偏离目标权重超过 rebalance_threshold (默认2%)
-  - 每周至少检查一次
+  - 每季度至少检查一次（季度末最后一个交易日）
 """
 
 from __future__ import annotations
@@ -226,21 +226,32 @@ class DividendCycleStrategy:
             category = scores.get(ts_code, {}).get("category", "")
             score_val = scores.get(ts_code, {}).get("total_score", 0)
             verdict = scores.get(ts_code, {}).get("verdict", "")
+            div_yield = scores.get(ts_code, {}).get("div_yield", 0)
 
             curr_w = current_weights.get(ts_code, 0.0)
             target_w = final_targets.get(ts_code, 0.0)
             delta = target_w - curr_w
 
+            # 构建详细理由
+            score_desc = f"评分{score_val:.0f}({verdict})"
+            yield_desc = f"股息率{div_yield:.2f}%" if div_yield > 0 else ""
+
             # 判断动作
             if abs(delta) < p.rebalance_threshold:
                 action = "hold"
-                reason = f"权重偏离{abs(delta)*100:.1f}%<阈值{p.rebalance_threshold*100:.0f}%"
+                reason = f"{score_desc}，权重偏离{abs(delta)*100:.1f}%<阈值{p.rebalance_threshold*100:.0f}%"
             elif delta > 0:
                 action = "buy"
-                reason = f"评分{score_val:.0f}→目标权重{target_w*100:.1f}%"
+                if curr_w == 0:
+                    reason = f"新买入，{score_desc}，{yield_desc}，目标权重{target_w*100:.1f}%"
+                else:
+                    reason = f"加仓，{score_desc}，{yield_desc}，权重{curr_w*100:.1f}%→{target_w*100:.1f}%"
             else:
                 action = "sell"
-                reason = f"评分{score_val:.0f}→目标权重{target_w*100:.1f}%"
+                if target_w == 0:
+                    reason = f"清仓，{score_desc}，低于观察阈值，当前权重{curr_w*100:.1f}%"
+                else:
+                    reason = f"减仓，{score_desc}，权重{curr_w*100:.1f}%→{target_w*100:.1f}%"
 
             # 零权重非持仓跳过
             if target_w == 0 and curr_w == 0:

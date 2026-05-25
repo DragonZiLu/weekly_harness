@@ -70,6 +70,7 @@ class Portfolio:
     投资组合管理器
 
     管理现金、持仓、交易记录和净值曲线。
+    支持红利入账（现金分红直接加入可用资金）。
     """
 
     def __init__(
@@ -80,6 +81,7 @@ class Portfolio:
         stamp_tax_rate: float = 0.001,     # 印花税 0.1%（仅卖出）
         slippage: float = 0.001,           # 滑点 0.1%
         lot_size: int = 100,               # 1手=100股
+        dividend_reinvest: bool = True,     # 红利再投资
     ):
         self.initial_cash = initial_cash
         self.cash = initial_cash
@@ -88,6 +90,7 @@ class Portfolio:
         self.stamp_tax_rate = stamp_tax_rate
         self.slippage = slippage
         self.lot_size = lot_size
+        self.dividend_reinvest = dividend_reinvest
 
         # 持仓
         self.positions: Dict[str, Position] = {}
@@ -97,6 +100,10 @@ class Portfolio:
         self.nav_curve: List[Dict] = []
         # 当前日期
         self.current_date: str = ""
+        # 红利记录
+        self.dividend_records: List[Dict] = []
+        # 季度持仓快照
+        self.holding_snapshots: List[Dict] = []
 
     @property
     def total_market_value(self) -> float:
@@ -150,6 +157,26 @@ class Portfolio:
                 if pos.shares > 0
             },
         })
+
+    def record_holding_snapshot(self):
+        """记录当前持仓快照（每次调仓后调用）"""
+        total_val = self.total_value
+        for code, pos in self.positions.items():
+            if pos.shares > 0:
+                self.holding_snapshots.append({
+                    "date": self.current_date,
+                    "ts_code": code,
+                    "name": pos.name,
+                    "category": pos.category,
+                    "shares": pos.shares,
+                    "cost_price": round(pos.cost_price, 3),
+                    "current_price": round(pos.current_price, 3),
+                    "market_value": round(pos.market_value, 2),
+                    "weight": round(pos.market_value / total_val * 100, 2) if total_val > 0 else 0,
+                    "profit_pct": round(pos.profit_pct, 2),
+                    "cash": round(self.cash, 2),
+                    "total_value": round(total_val, 2),
+                })
 
     def buy(
         self,
@@ -301,6 +328,59 @@ class Portfolio:
         self.trades.append(trade)
         return trade
 
+    def receive_dividend(
+        self,
+        ts_code: str,
+        name: str,
+        cash_per_share: float,
+        tax_rate: float = 0.0,
+    ) -> Optional[Dict]:
+        """
+        接收现金分红
+
+        Parameters
+        ----------
+        ts_code : str
+        name : str
+        cash_per_share : float — 每股派现金额（税前，A股单位：元）
+        tax_rate : float — 红利税率（默认0%，持股超1年免税）
+
+        Returns
+        -------
+        dict or None — 分红记录
+        """
+        if ts_code not in self.positions:
+            return None
+
+        pos = self.positions[ts_code]
+        if pos.shares <= 0:
+            return None
+
+        # 税后分红
+        gross_dividend = cash_per_share * pos.shares
+        tax = gross_dividend * tax_rate
+        net_dividend = gross_dividend - tax
+
+        if net_dividend <= 0:
+            return None
+
+        # 现金入账
+        self.cash += net_dividend
+
+        record = {
+            "date": self.current_date,
+            "ts_code": ts_code,
+            "name": name,
+            "shares": pos.shares,
+            "cash_per_share": cash_per_share,
+            "gross_dividend": round(gross_dividend, 2),
+            "tax": round(tax, 2),
+            "net_dividend": round(net_dividend, 2),
+            "tax_rate": tax_rate,
+        }
+        self.dividend_records.append(record)
+        return record
+
     def get_position_summary(self) -> pd.DataFrame:
         """获取持仓摘要"""
         rows = []
@@ -384,6 +464,8 @@ class Portfolio:
                 }
                 for t in self.trades
             ],
+            "dividend_records": self.dividend_records,
+            "holding_snapshots": self.holding_snapshots,
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
