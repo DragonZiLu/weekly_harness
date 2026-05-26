@@ -327,8 +327,18 @@ class WeeklyReporter:
             print(f"  ⚠️  历史数据读取失败: {e}")
             return pd.DataFrame()
 
-    def _append_to_history(self, raw_scores: Dict, validation: Dict):
-        """将本周评分追加到 weekly_history.csv"""
+    def _append_to_history(self, raw_scores: Dict, validation: Dict, force: bool = False):
+        """
+        将本周评分追加到 weekly_history.csv
+
+        采用 (week, ts_code) upsert 策略：
+        - 同一周同一股票的数据会被覆盖更新
+        - 新的股票数据会追加
+        - force=True 时整周覆盖（删除旧周全部数据再写入）
+
+        这样在修正 fallback 数据、token 恢复后重新运行时，
+        weekly_history.csv 会更新为新值，而非保留旧值。
+        """
         week = raw_scores.get("week", "?")
         date = raw_scores.get("timestamp", "")[:10]
         bond_yield = raw_scores.get("bond_yield_10y", 1.65)
@@ -364,16 +374,28 @@ class WeeklyReporter:
 
         if self.history_csv.exists():
             existing = pd.read_csv(self.history_csv, encoding="utf-8")
-            # 避免重复写入同一周数据
-            if week in existing["week"].values:
-                print(f"  ⚠️  {week} 数据已存在，跳过追加")
-                return
-            combined = pd.concat([existing, new_df], ignore_index=True)
+
+            if force:
+                # force 模式：删除该周全部旧数据，写入新数据
+                existing = existing[existing["week"] != week]
+                combined = pd.concat([existing, new_df], ignore_index=True)
+                print(f"  🔄 {week} 数据已覆盖（force模式）")
+            elif week in existing["week"].values:
+                # upsert 模式：按 (week, ts_code) 更新
+                # 删除该周已存在的股票数据，写入新数据
+                old_count = len(existing[existing["week"] == week])
+                existing = existing[~((existing["week"] == week) & (existing["ts_code"].isin(new_df["ts_code"])))]
+                combined = pd.concat([existing, new_df], ignore_index=True)
+                new_count = len(new_df)
+                print(f"  🔄 {week} 数据已更新（upsert: 更新{old_count}条中的{new_count}只股票）")
+            else:
+                combined = pd.concat([existing, new_df], ignore_index=True)
+                print(f"  💾 {week} 数据已追加")
         else:
             combined = new_df
 
         combined.to_csv(self.history_csv, index=False, encoding="utf-8")
-        print(f"  💾 历史数据已追加 → {self.history_csv} (共 {len(combined)} 条记录)")
+        print(f"  💾 历史数据 → {self.history_csv} (共 {len(combined)} 条记录)")
 
     # ─── 信号变化检测 ─────────────────────────────────────────
 
@@ -921,6 +943,7 @@ class WeeklyReporter:
         raw_scores: Dict,
         validation: Dict,
         artifacts_dir: Optional[Path] = None,
+        force: bool = False,
     ) -> Dict:
         """
         执行周报生成
@@ -933,6 +956,8 @@ class WeeklyReporter:
             来自 Validator 的 validation_report artifact
         artifacts_dir : Path, optional
             artifact 输出目录
+        force : bool, optional
+            强制覆盖该周全部历史数据（默认 upsert 模式）
 
         Returns
         -------
@@ -960,8 +985,8 @@ class WeeklyReporter:
         # 生成可视化图表
         self._generate_chart(raw_scores, history, week_dir)
 
-        # 追加历史数据
-        self._append_to_history(raw_scores, validation)
+        # 追加历史数据（upsert 或 force 覆盖）
+        self._append_to_history(raw_scores, validation, force=force)
 
         # 同步覆盖最新报告（向后兼容原有路径）
         latest_md = self.data_dir / "dividend_report.md"

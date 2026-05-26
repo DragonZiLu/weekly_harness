@@ -33,6 +33,7 @@ run_weekly.py — 红利周期投资周度评估入口
 
 from __future__ import annotations
 
+import argparse
 import sys
 import json
 import time
@@ -49,7 +50,8 @@ from weekly_harness.validator import WeeklyValidator
 from weekly_harness.reporter import WeeklyReporter
 
 
-def run_weekly_evaluation():
+def run_weekly_evaluation(args=None):
+    """完整的每周评估流程"""
     """
     完整的每周评估流程
 
@@ -57,6 +59,10 @@ def run_weekly_evaluation():
     问题可追溯，下游组件通过 artifact 而非直接调用传递数据。
     """
     start_time = time.time()
+
+    # 默认 args
+    if args is None:
+        args = argparse.Namespace(force=False)
 
     now = datetime.now()
     iso_week = now.strftime("%G-W%V")
@@ -114,6 +120,7 @@ def run_weekly_evaluation():
             raw_scores=raw_scores,
             validation=validation,
             artifacts_dir=artifacts_dir,
+            force=args.force,
         )
     except Exception as e:
         print(f"\n❌ Reporter 失败: {e}")
@@ -157,4 +164,7 @@ def run_weekly_evaluation():
 
 
 if __name__ == "__main__":
-    run_weekly_evaluation()
+    parser = argparse.ArgumentParser(description="红利周期投资周度评估")
+    parser.add_argument("--force", action="store_true", help="强制覆盖该周历史数据（整周替换）")
+    args = parser.parse_args()
+    run_weekly_evaluation(args)

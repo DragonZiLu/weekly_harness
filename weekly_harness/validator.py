@@ -195,7 +195,7 @@ class WeeklyValidator:
             return "medium"
         return "high"
 
-    def _check_score_sanity(self, ts_code: str, name: str, score: Dict) -> List[Dict]:
+    def _check_score_sanity(self, ts_code: str, name: str, score: Dict, bond_yield: float = 1.65) -> List[Dict]:
         """对评分结果做基本合理性检查"""
         alerts = []
         total = score.get("total_score", 0)
@@ -224,7 +224,7 @@ class WeeklyValidator:
             })
 
         # 检查债息差与股息率的一致性
-        expected_spread = (div_yield - 1.65) * 100  # 假设国债1.65%
+        expected_spread = (div_yield - bond_yield) * 100
         actual_spread = bond_spread_bp
         if abs(expected_spread - actual_spread) > 50:
             alerts.append({
@@ -292,7 +292,7 @@ class WeeklyValidator:
                 code_alerts.append(src_alert)
 
             # 3. 评分合理性检查
-            sanity_alerts = self._check_score_sanity(ts_code, name, score)
+            sanity_alerts = self._check_score_sanity(ts_code, name, score, bond_yield)
             code_alerts.extend(sanity_alerts)
 
             # 4. 自验证：fallback 新鲜度检测（P1）

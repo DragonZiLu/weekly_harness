@@ -167,21 +167,60 @@ class BacktestDataFetcher:
         start_date: str = "2020-01-01",
         end_date: str = "2026-12-31",
     ) -> pd.DataFrame:
-        """获取基准指数数据"""
-        pro = self._get_tushare_pro()
+        """
+        获取基准指数/ETF数据，自动识别指数/ETF
 
-        # 尝试用 index_daily 接口
+        对于指数：使用 index_daily 获取收盘价（指数无分红，不复权即可）
+        对于ETF：使用 fund_nav 获取累计净值（含分红再投资的真实收益）
+        """
+        pro = self._get_tushare_pro()
+        start_dt = start_date.replace("-", "")
+        end_dt = end_date.replace("-", "")
+
+        # 1) 先尝试 index_daily（适用于沪深300等指数）
         try:
             df = pro.index_daily(
                 ts_code=benchmark_code,
-                start_date=start_date.replace("-", ""),
-                end_date=end_date.replace("-", ""),
+                start_date=start_dt,
+                end_date=end_dt,
                 fields="ts_code,trade_date,open,high,low,close,vol",
             )
             if df is not None and not df.empty:
                 df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
                 df = df.sort_values("trade_date").reset_index(drop=True)
                 return df
+        except Exception:
+            pass
+
+        # 2) 尝试 fund_nav（适用于ETF，使用累计净值反映真实总收益）
+        try:
+            df_nav = pro.fund_nav(ts_code=benchmark_code)
+            if df_nav is not None and not df_nav.empty:
+                df_nav = df_nav.sort_values("nav_date").reset_index(drop=True)
+                # 筛选日期范围
+                df_nav["nav_date"] = pd.to_datetime(df_nav["nav_date"], format="%Y%m%d")
+                start_ts = pd.Timestamp(start_date)
+                end_ts = pd.Timestamp(end_date)
+                df_nav = df_nav[(df_nav["nav_date"] >= start_ts) & (df_nav["nav_date"] <= end_ts)]
+
+                if not df_nav.empty:
+                    # 优先使用复权净值(adj_nav)，其次累计净值(accum_nav)
+                    if "adj_nav" in df_nav.columns:
+                        nav_col = "adj_nav"
+                    elif "accum_nav" in df_nav.columns:
+                        nav_col = "accum_nav"
+                    else:
+                        nav_col = "unit_nav"
+
+                    # 统一为与 index_daily 相同的格式
+                    result = pd.DataFrame({
+                        "ts_code": df_nav["ts_code"],
+                        "trade_date": df_nav["nav_date"],
+                        "close": df_nav[nav_col].astype(float),
+                    })
+                    result = result.dropna(subset=["close"]).reset_index(drop=True)
+                    if not result.empty:
+                        return result
         except Exception:
             pass
 
@@ -316,7 +355,11 @@ class BacktestDataFetcher:
             if df.empty:
                 return pd.DataFrame()
 
-            return df[["ts_code", "ex_date", "cash_per_share"]].reset_index(drop=True)
+            # 保留 ann_date 用于回测时判断"当时已知的分红"
+            keep_cols = ["ts_code", "ex_date", "cash_per_share"]
+            if "ann_date" in df.columns:
+                keep_cols.append("ann_date")
+            return df[keep_cols].reset_index(drop=True)
 
         except Exception:
             return pd.DataFrame()
@@ -356,10 +399,13 @@ class BacktestEngine:
         self._price_data: Dict[str, pd.DataFrame] = {}
         # 基准数据
         self._benchmark: Optional[pd.DataFrame] = None
+        self._benchmark_code: str = ""
         # 分红数据 {ts_code: DataFrame}
         self._dividend_data: Dict[str, pd.DataFrame] = {}
         # 已处理的分红 (ts_code, ex_date) 防止重复
         self._processed_dividends: set = set()
+        # 调仓后持仓快照（用于构建日线净值）
+        self._rebalance_snapshots: List[Dict] = []
 
     def _load_stock_meta(self):
         """加载股票元数据（从 dividend_evaluator）"""
@@ -445,15 +491,17 @@ class BacktestEngine:
                 if ex_date_fmt <= date_str:
                     cash_per_share = row.get("cash_per_share", 0)
                     if cash_per_share > 0:
+                        eligible_shares = self.portfolio.shares_held_before(ts_code, ex_date_fmt)
                         # 红利税：季度调仓持股>1年，免税
-                        record = self.portfolio.receive_dividend(
-                            ts_code=ts_code,
-                            name=name,
-                            cash_per_share=cash_per_share,
-                            tax_rate=0.0,  # 持股>1年免税
-                        )
-                        if record:
-                            self._processed_dividends.add(div_key)
+                        if eligible_shares > 0:
+                            self.portfolio.receive_dividend(
+                                ts_code=ts_code,
+                                name=name,
+                                cash_per_share=cash_per_share,
+                                tax_rate=0.0,  # 持股>1年免税
+                                shares=eligible_shares,
+                            )
+                        self._processed_dividends.add(div_key)
 
     def _get_price_on_date(self, ts_code: str, date_str: str) -> Optional[float]:
         """获取某只股票在指定日期的收盘价（如非交易日取最近的前一交易日）"""
@@ -471,12 +519,134 @@ class BacktestEngine:
 
         return float(valid.iloc[-1]["close"])
 
+    def _get_dps_at_date(self, ts_code: str, date_str: str) -> Optional[float]:
+        """
+        获取指定日期时已知的最近一年度每股分红(DPS)
+
+        关键：只使用 ann_date <= date_str 的分红记录，
+        避免前视偏差（不使用未来才公告的分红信息）。
+        对于 A 股，年报分红通常在次年3-4月公告，
+        中期分红通常在8月公告。
+        """
+        if ts_code not in self._dividend_data:
+            return None
+
+        div_df = self._dividend_data[ts_code]
+        if div_df.empty:
+            return None
+
+        target_date = pd.Timestamp(date_str)
+
+        # 筛选已公告的分红（ann_date <= date_str）
+        if "ann_date" in div_df.columns:
+            div_df = div_df.copy()
+            div_df["ann_date_ts"] = pd.to_datetime(
+                div_df["ann_date"].astype(str), format="%Y%m%d", errors="coerce"
+            )
+            known = div_df[div_df["ann_date_ts"] <= target_date]
+        else:
+            # 无 ann_date，回退到 ex_date <= date_str（保守但仍可能有微小偏差）
+            div_df = div_df.copy()
+            div_df["ex_date_ts"] = pd.to_datetime(
+                div_df["ex_date"].astype(str), format="%Y%m%d", errors="coerce"
+            )
+            known = div_df[div_df["ex_date_ts"] <= target_date]
+
+        if known.empty:
+            return None
+
+        # 取最近一次年度分红的 DPS（用最后一行，因为已按 ex_date 排序）
+        return float(known.iloc[-1]["cash_per_share"])
+
+    def _get_trailing_dps_at_date(self, ts_code: str, date_str: str) -> float:
+        """
+        获取指定日期时的过去12个月(4个季度)累计每股分红
+
+        用于计算 trailing dividend yield：div_yield = trailing_dps / price * 100
+        只使用 ann_date <= date_str 的分红记录。
+        """
+        if ts_code not in self._dividend_data:
+            return 0.0
+
+        div_df = self._dividend_data[ts_code]
+        if div_df.empty:
+            return 0.0
+
+        target_date = pd.Timestamp(date_str)
+        one_year_ago = target_date - pd.DateOffset(years=1)
+
+        # 筛选已公告的分红
+        if "ann_date" in div_df.columns:
+            div_df = div_df.copy()
+            div_df["ann_date_ts"] = pd.to_datetime(
+                div_df["ann_date"].astype(str), format="%Y%m%d", errors="coerce"
+            )
+            # 只用当时已知的分红
+            known = div_df[div_df["ann_date_ts"] <= target_date]
+        else:
+            div_df = div_df.copy()
+            div_df["ex_date_ts"] = pd.to_datetime(
+                div_df["ex_date"].astype(str), format="%Y%m%d", errors="coerce"
+            )
+            known = div_df[div_df["ex_date_ts"] <= target_date]
+
+        if known.empty:
+            return 0.0
+
+        # 取 ex_date 在过去1年内的分红（除权日在过去12个月）
+        if "ex_date" in known.columns:
+            known = known.copy()
+            known["ex_date_ts"] = pd.to_datetime(
+                known["ex_date"].astype(str), format="%Y%m%d", errors="coerce"
+            )
+            trailing = known[known["ex_date_ts"] >= one_year_ago]
+        else:
+            trailing = known
+
+        if trailing.empty:
+            return 0.0
+
+        return float(trailing["cash_per_share"].sum())
+
+    # 中国10年期国债收益率历史关键节点（%）
+    # 数据来源：Wind / 中国债券信息网
+    _BOND_YIELD_HISTORY = {
+        2009: 3.60, 2010: 3.80, 2011: 3.90, 2012: 3.55,
+        2013: 4.10, 2014: 3.80, 2015: 3.00, 2016: 2.80,
+        2017: 3.90, 2018: 3.40, 2019: 3.20, 2020: 3.00,
+        2021: 2.80, 2022: 2.70, 2023: 2.60, 2024: 2.00,
+        2025: 1.70, 2026: 1.65,
+    }
+
+    def _get_bond_yield_at_date(self, date_str: str) -> float:
+        """
+        获取指定日期的10年期国债收益率（近似值）
+
+        基于年度关键节点线性插值，避免前视偏差。
+        """
+        dt = pd.Timestamp(date_str)
+        year = dt.year
+        frac = (dt - pd.Timestamp(f"{year}-01-01")).days / 365.0
+
+        y0 = self._BOND_YIELD_HISTORY.get(year)
+        y1 = self._BOND_YIELD_HISTORY.get(year + 1)
+
+        if y0 is None:
+            # 超出范围，用最近的
+            max_yr = max(self._BOND_YIELD_HISTORY.keys())
+            return self._BOND_YIELD_HISTORY[max_yr] / 100.0
+        if y1 is None:
+            return y0 / 100.0
+
+        # 线性插值
+        return (y0 + (y1 - y0) * frac) / 100.0
+
     def _simulate_scores_at_date(self, date_str: str) -> Dict[str, Dict]:
         """
         模拟指定日期的评分数据
 
-        方案1: 使用 weekly_history.csv 中已有的周度评分
-        方案2: 基于历史价格 + 股息率模拟评分（简化版）
+        方案1: 使用 weekly_history.csv 中已有的周度评分（实时评分，无前视偏差）
+        方案2: 基于历史分红数据 + 历史价格模拟评分（无前视偏差版本）
         """
         # 尝试从 weekly_history.csv 获取
         history_csv = _PROJECT_ROOT / "data" / "weekly_history.csv"
@@ -503,6 +673,7 @@ class BacktestEngine:
                         "pe_ttm": row.get("pe_ttm", 0),
                         "roe": row.get("roe", 0),
                         "bond_spread_bp": row.get("bond_spread_bp", 0),
+                        "score_source": "实时评分",
                     }
                 if scores:
                     return scores
@@ -512,70 +683,70 @@ class BacktestEngine:
 
     def _simulate_simple_scores(self, date_str: str) -> Dict[str, Dict]:
         """
-        基于历史价格的简化评分模拟
+        基于历史数据的简化评分模拟（无前视偏差版本）
 
-        使用当前 FALLBACK_DATA 中的股息率 + 历史价格变动来模拟评分
+        核心改进：
+        - 股息率：使用当时已公告的历史分红 + 历史价格计算，不使用当前 FALLBACK_DATA
+        - 国债收益率：使用历史年度数据线性插值
+        - PE/ROE：无历史数据，标记为 "历史模拟" 以区别于实时评分
         """
-        import sys
-        sys.path.insert(0, str(_PROJECT_ROOT))
-        from dividend_evaluator import FALLBACK_DATA, THRESHOLDS
-
         scores = {}
+        bond_yield = self._get_bond_yield_at_date(date_str)
+
         for ts_code, meta in self._stock_meta.items():
             price = self._get_price_on_date(ts_code, date_str)
-            fallback = FALLBACK_DATA.get(ts_code, {})
             category = meta["category"]
 
-            if price and price > 0 and fallback:
-                # 用 fallback 的股息率 + 当前价格模拟
-                fallback_close = fallback.get("close", 0)
-                fallback_div = fallback.get("div_yield", 0)
+            if not price or price <= 0:
+                continue
 
-                if fallback_close > 0 and fallback_div > 0:
-                    # 假设分红不变，股息率随价格反比变动
-                    sim_div_yield = fallback_div * (fallback_close / price)
-                else:
-                    sim_div_yield = fallback_div
+            # 使用历史分红数据计算 trailing dividend yield
+            trailing_dps = self._get_trailing_dps_at_date(ts_code, date_str)
+            if trailing_dps > 0 and price > 0:
+                sim_div_yield = trailing_dps / price * 100
+            else:
+                # 无历史分红数据（如新股/新ETF），跳过
+                continue
 
-                # 简化评分：主要基于股息率和息差
-                bond_yield = THRESHOLDS.get("bond_yield_10y", 1.65)
-                spread_bp = (sim_div_yield - bond_yield) * 100
+            # 息差
+            spread_bp = (sim_div_yield - bond_yield * 100)
 
-                # 简化评分公式（近似 DividendCycleEvaluator 的逻辑）
-                s1 = min(30, max(0, sim_div_yield * 5))   # 股息率评分
-                s2 = min(25, max(0, spread_bp / 10))       # 息差评分
-                s3 = min(20, max(0, sim_div_yield * 3))    # 等效分红
-                certainty_score = {"AA": 15, "A": 13, "A-": 11, "B+": 8, "B": 5}.get(
-                    meta.get("certainty", "B+"), 8
-                )
-                s4 = certainty_score
-                s5 = 5  # 成长性给默认值
+            # 简化评分公式（近似 DividendCycleEvaluator 的逻辑）
+            s1 = min(30, max(0, sim_div_yield * 5))   # 股息率评分
+            s2 = min(25, max(0, spread_bp / 10))       # 息差评分
+            s3 = min(20, max(0, sim_div_yield * 3))    # 等效分红
+            certainty_score = {"AA": 15, "A": 13, "A-": 11, "B+": 8, "B": 5}.get(
+                meta.get("certainty", "B+"), 8
+            )
+            s4 = certainty_score
+            s5 = 5  # 成长性给默认值
 
-                total = s1 + s2 + s3 + s4 + s5
+            total = s1 + s2 + s3 + s4 + s5
 
-                # 确定信号
-                if total >= 80:
-                    verdict = "🔥 大胆攒股"
-                elif total >= 65:
-                    verdict = "✅ 积极布局"
-                elif total >= 50:
-                    verdict = "👀 观察等待"
-                elif total >= 35:
-                    verdict = "⏸️ 暂缓"
-                else:
-                    verdict = "🚫 回避"
+            # 确定信号
+            if total >= 80:
+                verdict = "🔥 大胆攒股"
+            elif total >= 65:
+                verdict = "✅ 积极布局"
+            elif total >= 50:
+                verdict = "👀 观察等待"
+            elif total >= 35:
+                verdict = "⏸️ 暂缓"
+            else:
+                verdict = "🚫 回避"
 
-                scores[ts_code] = {
-                    "name": meta["name"],
-                    "category": category,
-                    "total_score": round(total, 1),
-                    "verdict": verdict,
-                    "div_yield": round(sim_div_yield, 2),
-                    "close": price,
-                    "pe_ttm": fallback.get("pe_ttm", 0),
-                    "roe": fallback.get("roe", 0),
-                    "bond_spread_bp": round(spread_bp, 0),
-                }
+            scores[ts_code] = {
+                "name": meta["name"],
+                "category": category,
+                "total_score": round(total, 1),
+                "verdict": verdict,
+                "div_yield": round(sim_div_yield, 2),
+                "close": price,
+                "pe_ttm": 0,  # 无历史PE数据
+                "roe": 0,     # 无历史ROE数据
+                "bond_spread_bp": round(spread_bp, 0),
+                "score_source": "历史模拟",  # 标记评分来源
+            }
 
         return scores
 
@@ -674,7 +845,11 @@ class BacktestEngine:
             print(f"  📋 持仓标的: {len(self._stock_meta)} 只")
 
         # 获取基准数据
+        self._benchmark_code = benchmark_code
         self._benchmark = self.fetcher.fetch_benchmark_data(benchmark_code, start_date, end_date)
+
+        # 重置调仓快照
+        self._rebalance_snapshots = []
 
         # 逐周模拟
         for i, date_str in enumerate(rebalance_dates):
@@ -717,6 +892,17 @@ class BacktestEngine:
             # 记录持仓快照
             self.portfolio.record_holding_snapshot()
 
+            # 记录调仓后持仓（用于构建日线净值）
+            self._rebalance_snapshots.append({
+                "date": date_str,
+                "cash": self.portfolio.cash,
+                "positions": {
+                    code: pos.shares
+                    for code, pos in self.portfolio.positions.items()
+                    if pos.shares > 0
+                },
+            })
+
             # 记录净值
             self.portfolio.record_nav()
 
@@ -728,6 +914,394 @@ class BacktestEngine:
         # 计算绩效
         return self._calculate_results(start_date, end_date, verbose)
 
+    def _build_daily_nav(self, start_date: str, end_date: str) -> pd.DataFrame:
+        """
+        构建逐交易日净值序列，用于准确计算绩效指标
+
+        利用调仓后的持仓快照 + 全量日线价格，计算出每个交易日的总资产。
+        相比仅用调仓日净值（45个点），日线净值（~2800个点）能更准确计算
+        年化收益、最大回撤和夏普比率。
+        """
+        # 1. 获取所有交易日（优先使用持仓标的价格数据，确保覆盖完整回测期间）
+        all_dates = None
+        # 从持仓标的中找最长价格序列作为交易日历
+        for df in self._price_data.values():
+            if not df.empty:
+                dates = df["trade_date"].sort_values().tolist()
+                if all_dates is None or len(dates) > len(all_dates):
+                    all_dates = dates
+        # 仅在无价格数据时才用基准日期
+        if not all_dates and self._benchmark is not None and not self._benchmark.empty:
+            all_dates = self._benchmark["trade_date"].sort_values().tolist()
+
+        if not all_dates:
+            return pd.DataFrame()
+
+        # 筛选回测期间
+        start_ts = pd.Timestamp(start_date)
+        end_ts = pd.Timestamp(end_date)
+        all_dates = [d for d in all_dates if start_ts <= d <= end_ts]
+
+        if not all_dates:
+            return pd.DataFrame()
+
+        date_index = pd.DatetimeIndex(all_dates)
+
+        # 2. 构建价格矩阵（前向填充缺失价格，如停牌日）
+        price_df = pd.DataFrame(index=date_index)
+        for ts_code, df in self._price_data.items():
+            if not df.empty:
+                s = df.set_index("trade_date")["close"].reindex(date_index).ffill()
+                price_df[ts_code] = s
+
+        # 3. 构建持仓矩阵和现金序列
+        snapshots = sorted(self._rebalance_snapshots, key=lambda x: x["date"])
+
+        # 初始化：全部为初始现金，0 持仓
+        shares_df = pd.DataFrame(0.0, index=date_index, columns=price_df.columns)
+        cash_series = pd.Series(float(self.portfolio.initial_cash), index=date_index)
+
+        # 按调仓快照填充持仓和现金
+        for i, snap in enumerate(snapshots):
+            snap_ts = pd.Timestamp(snap["date"])
+            if i + 1 < len(snapshots):
+                next_ts = pd.Timestamp(snapshots[i + 1]["date"])
+                mask = (date_index >= snap_ts) & (date_index < next_ts)
+            else:
+                mask = date_index >= snap_ts
+
+            for ts_code, shares in snap["positions"].items():
+                if ts_code in shares_df.columns:
+                    shares_df.loc[mask, ts_code] = float(shares)
+
+            cash_series.loc[mask] = float(snap["cash"])
+
+        # 4. 构建累计分红序列
+        # 将分红记录按除权日映射到日线索引
+        cum_div_series = pd.Series(0.0, index=date_index)
+        for rec in self.portfolio.dividend_records:
+            rec_date = pd.Timestamp(rec["date"])
+            if rec_date in cum_div_series.index:
+                cum_div_series.loc[rec_date] += rec.get("net_dividend", 0)
+        cum_div_series = cum_div_series.cumsum()
+
+        # 5. 计算每日总资产 = 现金 + 持仓市值
+        market_value_series = (shares_df * price_df).sum(axis=1)
+        total_value_series = cash_series + market_value_series
+
+        # 股价收益 = 总资产 - 累计分红（剔除分红后的纯资本增值）
+        price_value_series = total_value_series - cum_div_series
+
+        return pd.DataFrame({
+            "date": [d.strftime("%Y-%m-%d") for d in date_index],
+            "total_value": total_value_series.round(2).values,
+            "cum_dividend": cum_div_series.round(2).values,
+            "price_value": price_value_series.round(2).values,
+        })
+
+    def _generate_yearly_commentary(
+        self,
+        year: int,
+        total_ret: float,
+        price_ret: float,
+        div_ret: float,
+        max_dd: float,
+        buy_count: int,
+        sell_count: int,
+        commission: float,
+        div_count: int,
+        div_total: float,
+        trades_detail: List[Dict],
+        year_div: float,
+        start_value: float,
+    ) -> str:
+        """
+        生成年度交易总结与反思
+
+        基于规则引擎，对每年的市场环境、交易行为、策略表现进行评述。
+        """
+        parts: List[str] = []
+
+        # ── 1. 市场环境定性 ──
+        if total_ret >= 30:
+            market = "牛市行情，市场情绪高涨"
+        elif total_ret >= 15:
+            market = "偏强市场，结构性机会丰富"
+        elif total_ret >= 5:
+            market = "震荡偏强，个股分化明显"
+        elif total_ret >= -5:
+            market = "震荡市，缺乏明确方向"
+        elif total_ret >= -15:
+            market = "弱势调整，防御为先"
+        else:
+            market = "熊市环境，系统性风险释放"
+
+        parts.append(f"**市场环境**：{market}。本年收益 {total_ret:+.1f}%。")
+
+        # ── 2. 收益结构分析 ──
+        if abs(div_ret) > 0.01:
+            div_ratio = div_ret / total_ret * 100 if abs(total_ret) > 0.01 else 0
+            if div_ratio > 80:
+                parts.append(
+                    f"**收益结构**：股息收益 {div_ret:+.1f}% 占比极高（{div_ratio:.0f}%），"
+                    f"股价仅贡献 {price_ret:+.1f}%。红利是本年核心收益来源，"
+                    f"体现出红利策略在弱势/震荡市中的防御价值。"
+                )
+            elif div_ratio > 40:
+                parts.append(
+                    f"**收益结构**：股息贡献 {div_ret:+.1f}%（占 {div_ratio:.0f}%），"
+                    f"股价贡献 {price_ret:+.1f}%。股息提供稳定底仓收益，"
+                    f"资本增值贡献了另一半涨幅。"
+                )
+            else:
+                parts.append(
+                    f"**收益结构**：资本增值 {price_ret:+.1f}% 是主要驱动力，"
+                    f"股息 {div_ret:+.1f}% 提供安全垫。股价上涨是盈利核心。"
+                )
+        else:
+            parts.append(f"**收益结构**：本年无显著分红贡献，收益完全来自资本增值 {price_ret:+.1f}%。")
+
+        # ── 3. 回撤与风险 ──
+        if max_dd <= -20:
+            parts.append(
+                f"**风险暴露**：最大回撤 {max_dd:.1f}%，属于深度回撤。"
+                f"即便年末修复，回撤期间的持仓体验仍十分煎熬。"
+                f"反思：是否应在回撤扩大时减仓或对冲？红利策略的优势在于"
+                f"股息现金流提供了心理锚点，帮助扛过极端波动。"
+            )
+        elif max_dd <= -10:
+            parts.append(
+                f"**风险暴露**：最大回撤 {max_dd:.1f}%，中等回撤水平。"
+                f"红利组合的低波动特性得到体现，回撤幅度相对可控。"
+            )
+        else:
+            parts.append(
+                f"**风险暴露**：最大回撤仅 {max_dd:.1f}%，回撤控制优秀。"
+                f"组合波动率低，持仓体验良好。"
+            )
+
+        # ── 4. 交易行为分析 ──
+        total_trades = buy_count + sell_count
+        if total_trades == 0:
+            parts.append("**交易行为**：全年无调仓，持有不动。低换手策略节省了交易成本。")
+        elif total_trades <= 4:
+            parts.append(
+                f"**交易行为**：全年仅 {buy_count} 买 {sell_count} 卖，调仓频率极低。"
+                f"交易手续费 {commission:,.0f} 元，摩擦成本可忽略。"
+                f"低换手是红利策略的优势——省心省力。"
+            )
+        elif total_trades <= 12:
+            parts.append(
+                f"**交易行为**：全年 {buy_count} 买 {sell_count} 卖，调仓节奏适中。"
+                f"手续费 {commission:,.0f} 元。"
+                f"季度调仓机制自动捕捉评分变化，无需频繁操作。"
+            )
+        else:
+            parts.append(
+                f"**交易行为**：全年 {buy_count} 买 {sell_count} 卖，交易偏频繁。"
+                f"手续费 {commission:,.0f} 元，需关注换手成本对收益的侵蚀。"
+                f"反思：频繁调仓是否真正增厚了收益？还是只是增加了成本？"
+            )
+
+        # ── 5. 重点交易反思 ──
+        if trades_detail:
+            # 找出金额最大的买入和卖出
+            buys = [t for t in trades_detail if t["action"] == "buy"]
+            sells = [t for t in trades_detail if t["action"] == "sell"]
+            key_insights = []
+
+            if buys:
+                top_buy = max(buys, key=lambda t: t["amount"])
+                key_insights.append(
+                    f"最大买入：{top_buy['name']} {top_buy['shares']}股 @ {top_buy['price']:.2f}，"
+                    f"金额 {top_buy['amount']:,.0f} 元"
+                )
+            if sells:
+                top_sell = max(sells, key=lambda t: t["amount"])
+                key_insights.append(
+                    f"最大卖出：{top_sell['name']} {top_sell['shares']}股 @ {top_sell['price']:.2f}，"
+                    f"金额 {top_sell['amount']:,.0f} 元"
+                )
+
+            # 卖出标的是否在后续上涨？（事后视角的反思）
+            sell_names = [t["name"] for t in sells]
+            if sell_names and total_ret < 0:
+                key_insights.append(
+                    f"本年卖出标的：{', '.join(sell_names)}。在亏损年份卖出可能是止损，"
+                    f"但也可能是低位割肉——需关注卖出后的走势验证。"
+                )
+
+            if key_insights:
+                parts.append("**重点交易**：" + "；".join(key_insights) + "。")
+
+        # ── 6. 分红总结 ──
+        if div_count > 0:
+            parts.append(
+                f"**分红贡献**：{div_count} 次分红入账 {div_total:,.0f} 元，"
+                f"占年初资产 {div_total / start_value * 100:.1f}%。"
+                f"股息现金流是红利策略的「压舱石」，在震荡和下跌市中尤为重要。"
+            )
+
+        # ── 7. 年度总结 ──
+        if total_ret >= 20:
+            lesson = "顺势持有，让利润奔跑。红利股在牛市同样能提供可观回报。"
+        elif total_ret >= 5:
+            lesson = "稳健积累，股息再投资是复利增长的关键。"
+        elif total_ret >= -5:
+            lesson = "震荡市中守住本金比追求收益更重要，股息提供了心理支撑。"
+        elif total_ret >= -15:
+            lesson = "控制回撤比追求收益更重要，红利策略的防御性在弱势中凸显。"
+        else:
+            lesson = "极端行情考验持仓纪律，股息现金流帮助扛过至暗时刻。"
+
+        parts.append(f"**年度感悟**：{lesson}")
+
+        return "\n\n".join(parts)
+
+    def _get_benchmark_name(self) -> str:
+        """获取基准名称"""
+        code = self._benchmark_code
+        name_map = {
+            "000300.SH": "沪深300",
+            "515180.SH": "易方达红利ETF",
+            "510880.SH": "华夏红利ETF",
+            "000922.SH": "中证红利",
+        }
+        return name_map.get(code, code)
+
+    def _calc_yearly_returns(self, daily_nav_df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None) -> List[Dict]:
+        """
+        计算逐年收益指标
+
+        对每个自然年，计算：
+        - 总收益率、股价收益率、股息收益率
+        - 最大回撤
+        - 年初/年末总资产
+        - 交易统计（买卖次数、手续费）
+        - 分红统计（分红次数、分红金额）
+        - 基准年度收益（如基准数据覆盖该年）
+        """
+        if daily_nav_df.empty:
+            return []
+
+        df = daily_nav_df.copy()
+        df["date_ts"] = pd.to_datetime(df["date"])
+        df["year"] = df["date_ts"].dt.year
+
+        # 预处理交易和分红记录按年分组
+        trade_df = self.portfolio.get_trade_log()
+        if not trade_df.empty:
+            trade_df = trade_df.copy()
+            trade_df["year"] = pd.to_datetime(trade_df["date"]).dt.year
+
+        div_records = self.portfolio.dividend_records
+        div_by_year: Dict[int, List] = {}
+        for rec in div_records:
+            y = pd.Timestamp(rec["date"]).year
+            div_by_year.setdefault(y, []).append(rec)
+
+        # 预处理基准数据按年分组
+        bm_by_year: Dict[int, Dict] = {}
+        if benchmark_df is not None and not benchmark_df.empty:
+            bm = benchmark_df.copy()
+            bm["trade_date"] = pd.to_datetime(bm["trade_date"])
+            bm["year"] = bm["trade_date"].dt.year
+            for y in sorted(bm["year"].unique()):
+                yb = bm[bm["year"] == y]
+                if len(yb) >= 2:
+                    bm_start = yb.iloc[0]["close"]
+                    bm_end = yb.iloc[-1]["close"]
+                    if bm_start > 0:
+                        bm_by_year[int(y)] = {
+                            "return": (bm_end / bm_start - 1) * 100,
+                            "start_date": yb.iloc[0]["trade_date"],
+                            "end_date": yb.iloc[-1]["trade_date"],
+                        }
+
+        years = sorted(df["year"].unique())
+        results = []
+
+        for year in years:
+            year_df = df[df["year"] == year]
+            if year_df.empty:
+                continue
+
+            # 年初值 = 该年第一个交易日的值
+            start_total = year_df.iloc[0]["total_value"]
+            start_cum_div = year_df.iloc[0]["cum_dividend"]
+            start_price_val = start_total - start_cum_div
+
+            # 年末值
+            end_total = year_df.iloc[-1]["total_value"]
+            end_cum_div = year_df.iloc[-1]["cum_dividend"]
+            end_price_val = end_total - end_cum_div
+
+            # 该年度内新增的分红
+            year_div = end_cum_div - start_cum_div
+
+            # 收益率（基于年初值）
+            if start_total > 0:
+                total_ret = (end_total / start_total - 1) * 100
+                div_ret = year_div / start_total * 100
+                price_ret = total_ret - div_ret
+            else:
+                total_ret = div_ret = price_ret = 0.0
+
+            # 年度最大回撤
+            nav_series = year_df.set_index("date")["total_value"]
+            max_dd = self.metrics.max_drawdown(nav_series)
+
+            # 逐年交易统计
+            yr_buys = yr_sells = 0
+            yr_commission = 0.0
+            yr_trades_detail: List[Dict] = []
+            if not trade_df.empty and year in trade_df["year"].values:
+                yr_trades = trade_df[trade_df["year"] == year]
+                yr_buys = len(yr_trades[yr_trades["action"] == "buy"])
+                yr_sells = len(yr_trades[yr_trades["action"] == "sell"])
+                yr_commission = yr_trades["commission"].sum()
+                yr_trades_detail = yr_trades.to_dict("records")
+
+            # 逐年分红统计
+            yr_div_records = div_by_year.get(year, [])
+            yr_div_count = len(yr_div_records)
+            yr_div_total = sum(r.get("net_dividend", 0) for r in yr_div_records)
+
+            # 逐年基准收益
+            yr_bm_return = None
+            yr_excess = None
+            if year in bm_by_year:
+                yr_bm_return = round(bm_by_year[year]["return"], 2)
+                yr_excess = round(total_ret - yr_bm_return, 2)
+
+            results.append({
+                "year": int(year),
+                "start_value": round(start_total, 2),
+                "end_value": round(end_total, 2),
+                "total_return": round(total_ret, 2),
+                "price_return": round(price_ret, 2),
+                "dividend_return": round(div_ret, 2),
+                "year_dividend": round(year_div, 2),
+                "max_drawdown": round(max_dd, 2),
+                "buy_count": yr_buys,
+                "sell_count": yr_sells,
+                "trade_count": yr_buys + yr_sells,
+                "commission": round(yr_commission, 2),
+                "div_count": yr_div_count,
+                "div_total": round(yr_div_total, 2),
+                "benchmark_return": yr_bm_return,
+                "excess_return": yr_excess,
+                "trades_detail": yr_trades_detail,
+                "div_detail": yr_div_records,
+                "commentary": self._generate_yearly_commentary(
+                    int(year), total_ret, price_ret, div_ret, max_dd,
+                    yr_buys, yr_sells, yr_commission, yr_div_count, yr_div_total,
+                    yr_trades_detail, year_div, start_total,
+                ),
+            })
+
+        return results
+
     def _calculate_results(self, start_date: str, end_date: str, verbose: bool) -> Dict:
         """计算回测结果和绩效指标"""
         nav_df = self.portfolio.get_nav_dataframe()
@@ -736,21 +1310,37 @@ class BacktestEngine:
         if nav_df.empty:
             return {"error": "无净值数据"}
 
+        # 构建逐交易日净值序列
+        daily_nav_df = self._build_daily_nav(start_date, end_date)
+
         # 基本指标
         total_return = self.portfolio.total_return
-        trading_days = len(nav_df)
-        annual_return = self.metrics.annual_return(total_return, trading_days * 5)  # 周数据×5≈交易日
 
-        # 最大回撤
-        nav_series = nav_df.set_index("date")["total_value"]
-        max_dd = self.metrics.max_drawdown(nav_series)
+        if not daily_nav_df.empty and len(daily_nav_df) > 1:
+            # 使用真实交易日数量计算绩效
+            trading_days = len(daily_nav_df)
+            annual_return = self.metrics.annual_return(total_return, trading_days)
 
-        # 夏普比率
-        if len(nav_df) > 1:
-            returns = nav_df["total_value"].pct_change().dropna()
-            sharpe = self.metrics.sharpe_ratio(returns)
+            # 最大回撤（基于日线净值）
+            daily_nav_series = daily_nav_df.set_index("date")["total_value"]
+            max_dd = self.metrics.max_drawdown(daily_nav_series)
+
+            # 夏普比率（基于日线收益率）
+            daily_returns = daily_nav_df["total_value"].pct_change().dropna()
+            sharpe = self.metrics.sharpe_ratio(daily_returns)
         else:
-            sharpe = 0.0
+            # 回退：基于调仓日净值（不乘5，用实际天数估算）
+            first_date = pd.Timestamp(nav_df["date"].iloc[0])
+            last_date = pd.Timestamp(nav_df["date"].iloc[-1])
+            trading_days = max(1, int((last_date - first_date).days * 5 / 7))
+            annual_return = self.metrics.annual_return(total_return, trading_days)
+            nav_series = nav_df.set_index("date")["total_value"]
+            max_dd = self.metrics.max_drawdown(nav_series)
+            if len(nav_df) > 1:
+                returns = nav_df["total_value"].pct_change().dropna()
+                sharpe = self.metrics.sharpe_ratio(returns)
+            else:
+                sharpe = 0.0
 
         # 卡尔玛比率
         calmar = self.metrics.calmar_ratio(annual_return, max_dd)
@@ -766,8 +1356,17 @@ class BacktestEngine:
         total_dividend = sum(d.get("net_dividend", 0) for d in dividend_records)
         dividend_contribution = total_dividend / self.portfolio.initial_cash * 100  # 红利贡献(%)
 
+        # 收益分解：股息收益 vs 股价收益
+        # price_return = 总收益 - 股息收益（剔除分红后的纯资本增值）
+        dividend_return = dividend_contribution  # 股息收益率(%)
+        price_return = total_return - dividend_return  # 股价收益率(%)
+
+        # 年度收益分解（含逐年基准对比）
+        yearly_returns = self._calc_yearly_returns(daily_nav_df, self._benchmark)
+
         # 基准对比
         benchmark_return = 0.0
+        benchmark_name = self._get_benchmark_name()
         if self._benchmark is not None and not self._benchmark.empty:
             bm_start = self._benchmark.iloc[0]["close"]
             bm_end = self._benchmark.iloc[-1]["close"]
@@ -791,11 +1390,16 @@ class BacktestEngine:
             "total_commission": round(total_commission, 2),
             "benchmark_return": round(benchmark_return, 2),
             "excess_return": round(excess_return, 2),
+            "benchmark_code": self._benchmark_code,
+            "benchmark_name": benchmark_name,
             "trading_periods": trading_days,
             "rebalance_freq": self.rebalance_freq,
             "total_dividend": round(total_dividend, 2),
             "dividend_count": len(dividend_records),
             "dividend_contribution": round(dividend_contribution, 2),
+            "dividend_return": round(dividend_return, 2),
+            "price_return": round(price_return, 2),
+            "yearly_returns": yearly_returns,
         }
 
         if verbose:
@@ -809,11 +1413,17 @@ class BacktestEngine:
         print("  📊 红利周期轮动策略 — 回测结果")
         print("=" * 70)
 
+        # 评分数据来源提示
+        print(f"\n  ⚠️  评分数据来源: 历史分红数据模拟（无前视偏差）")
+        print(f"     股息率=当时已公告分红/历史价格, 国债收益率=年度插值近似")
+
         print(f"\n  ── 收益指标 ──")
         print(f"  回测期间:     {results['period']}")
         print(f"  初始资金:     {results['initial_cash']:,.0f} 元")
         print(f"  最终资产:     {results['final_value']:,.2f} 元")
         print(f"  总收益率:     {results['total_return']:+.2f}%")
+        print(f"    ├─ 股价收益: {results['price_return']:+.2f}%")
+        print(f"    └─ 股息收益: {results['dividend_return']:+.2f}%")
         print(f"  年化收益率:   {results['annual_return']:+.2f}%")
 
         print(f"\n  ── 风险指标 ──")
@@ -832,11 +1442,39 @@ class BacktestEngine:
         print(f"\n  ── 红利收益 ──")
         print(f"  分红次数:     {results['dividend_count']} 次")
         print(f"  累计红利:     {results['total_dividend']:,.2f} 元")
-        print(f"  红利贡献:     {results['dividend_contribution']:.2f}%（占初始资金）")
+        print(f"  股息收益率:   {results['dividend_return']:+.2f}%（占初始资金）")
+        print(f"  股价收益率:   {results['price_return']:+.2f}%（剔除分红后）")
 
         print(f"\n  ── 基准对比 ──")
+        bm_name = results.get("benchmark_name", results.get("benchmark_code", "基准"))
+        print(f"  基准标的:     {bm_name}")
         print(f"  基准收益:     {results['benchmark_return']:+.2f}%")
         print(f"  超额收益:     {results['excess_return']:+.2f}%")
+
+        # 年度收益
+        yearly = results.get("yearly_returns", [])
+        has_bm = any(yr.get("benchmark_return") is not None for yr in yearly)
+        if yearly:
+            print(f"\n  ── 逐年收益 ──")
+            bm_header = f" {'基准':>8} {'超额':>8}" if has_bm else ""
+            print(f"  {'年份':>6} {'总收益':>8} {'股价':>8} {'股息':>8} {'回撤':>8}{bm_header} │ {'买入':>4} {'卖出':>4} {'手续费':>8} │ {'分红':>4} {'分红额':>9}")
+            sep_len = 86 + (20 if has_bm else 0)
+            print("  " + "-" * sep_len)
+            for yr in yearly:
+                bm_cols = ""
+                if has_bm:
+                    bm_ret = yr.get("benchmark_return")
+                    exc_ret = yr.get("excess_return")
+                    bm_str = f"{bm_ret:>+7.1f}%" if bm_ret is not None else f"{'N/A':>8}"
+                    exc_str = f"{exc_ret:>+7.1f}%" if exc_ret is not None else f"{'N/A':>8}"
+                    bm_cols = f" {bm_str} {exc_str}"
+                print(
+                    f"  {yr['year']:>6} {yr['total_return']:>+7.1f}% "
+                    f"{yr['price_return']:>+7.1f}% {yr['dividend_return']:>+7.1f}% "
+                    f"{yr['max_drawdown']:>7.1f}%{bm_cols} │ "
+                    f"{yr['buy_count']:>4} {yr['sell_count']:>4} {yr['commission']:>7.0f} │ "
+                    f"{yr['div_count']:>4} {yr['div_total']:>8.0f}"
+                )
 
         # 最终持仓
         pos_df = self.portfolio.get_position_summary()
@@ -871,7 +1509,9 @@ class BacktestEngine:
             f"# 📊 红利周期轮动策略 — 回测报告",
             f"\n> **回测期间**: {results['period']}  ",
             f"> **生成时间**: {now_str}  ",
-            f"> **初始资金**: {results['initial_cash']:,.0f} 元  \n",
+            f"> **初始资金**: {results['initial_cash']:,.0f} 元  ",
+            f"> **评分数据来源**: 历史分红数据模拟（无前视偏差）  ",
+            f"> **股息率计算**: 当时已公告分红÷历史价格，国债收益率按年度插值近似  \n",
             "---\n",
         ]
 
@@ -880,6 +1520,8 @@ class BacktestEngine:
         lines.append("| 指标 | 值 |")
         lines.append("|------|-----|")
         lines.append(f"| 总收益率 | **{results['total_return']:+.2f}%** |")
+        lines.append(f"| ├─ 股价收益 | {results['price_return']:+.2f}% |")
+        lines.append(f"| └─ 股息收益 | {results['dividend_return']:+.2f}% |")
         lines.append(f"| 年化收益率 | **{results['annual_return']:+.2f}%** |")
         lines.append(f"| 最终资产 | {results['final_value']:,.2f} 元 |")
         lines.append(f"| 最大回撤 | {results['max_drawdown']:.2f}% |")
@@ -888,12 +1530,93 @@ class BacktestEngine:
         lines.append("")
 
         # 基准对比
+        bm_name = results.get("benchmark_name", results.get("benchmark_code", "基准"))
         lines.append("## 📊 基准对比\n")
-        lines.append("| 指标 | 策略 | 基准(沪深300) |")
+        lines.append(f"| 指标 | 策略 | 基准({bm_name}) |")
         lines.append("|------|------|--------------|")
         lines.append(f"| 收益率 | {results['total_return']:+.2f}% | {results['benchmark_return']:+.2f}% |")
         lines.append(f"| 超额收益 | {results['excess_return']:+.2f}% | — |")
         lines.append("")
+
+        # 年度收益
+        yearly = results.get("yearly_returns", [])
+        has_bm = any(yr.get("benchmark_return") is not None for yr in yearly)
+        if yearly:
+            lines.append("## 📅 逐年收益\n")
+            bm_cols_h = " | 基准收益 | 超额收益" if has_bm else ""
+            bm_cols_s = " |--------|--------" if has_bm else ""
+            lines.append(f"| 年份 | 年初资产 | 年末资产 | 总收益 | 股价收益 | 股息收益 | 最大回撤 │ 买入 | 卖出 | 手续费 | 分红次数 | 分红金额{bm_cols_h} |")
+            lines.append(f"|------|---------|---------|--------|---------|---------|--------|------|------|--------|---------|---------{bm_cols_s} |")
+            for yr in yearly:
+                bm_cols_v = ""
+                if has_bm:
+                    bm_ret = yr.get("benchmark_return")
+                    exc_ret = yr.get("excess_return")
+                    bm_str = f"{bm_ret:+.1f}%" if bm_ret is not None else "N/A"
+                    exc_str = f"{exc_ret:+.1f}%" if exc_ret is not None else "N/A"
+                    bm_cols_v = f" | {bm_str} | {exc_str}"
+                lines.append(
+                    f"| {yr['year']} | {yr['start_value']:,.0f} | {yr['end_value']:,.0f} | "
+                    f"**{yr['total_return']:+.1f}%** | {yr['price_return']:+.1f}% | "
+                    f"{yr['dividend_return']:+.1f}% | {yr['max_drawdown']:.1f}% │ "
+                    f"{yr['buy_count']} | {yr['sell_count']} | {yr['commission']:,.0f} | "
+                    f"{yr['div_count']} | {yr['div_total']:,.0f}{bm_cols_v} |"
+                )
+            lines.append("")
+
+            # 逐年交易明细
+            lines.append("## 🔄 逐年交易明细\n")
+            for yr in yearly:
+                yr_trades = yr.get("trades_detail", [])
+                yr_divs = yr.get("div_detail", [])
+                commentary = yr.get("commentary", "")
+
+                lines.append(f"### {yr['year']}\n")
+                summary_line = (
+                    f"- 总收益 {yr['total_return']:+.1f}% "
+                    f"(股价 {yr['price_return']:+.1f}% + 股息 {yr['dividend_return']:+.1f}%) "
+                    f"| 回撤 {yr['max_drawdown']:.1f}% "
+                    f"| 买入{yr['buy_count']}次 卖出{yr['sell_count']}次 "
+                    f"| 手续费 {yr['commission']:,.0f} 元"
+                )
+                bm_ret = yr.get("benchmark_return")
+                if bm_ret is not None:
+                    exc_ret = yr.get("excess_return", 0)
+                    summary_line += f" | {bm_name} {bm_ret:+.1f}% 超额 {exc_ret:+.1f}%"
+                lines.append(summary_line)
+                lines.append("")
+
+                # 交易明细
+                if yr_trades:
+                    lines.append("| 日期 | 标的 | 动作 | 价格 | 数量 | 金额 | 手续费 | 理由 |")
+                    lines.append("|------|------|------|------|------|------|--------|------|")
+                    for t in yr_trades:
+                        action_str = "🟢买入" if t["action"] == "buy" else "🔴卖出"
+                        reason = t.get("reason", "")
+                        lines.append(
+                            f"| {str(t['date'])[:10]} | {t['name']} | {action_str} | "
+                            f"{t['price']:.2f} | {t['shares']} | {t['amount']:,.0f} | "
+                            f"{t['commission']:.0f} | {reason} |"
+                        )
+                    lines.append("")
+
+                # 分红明细
+                if yr_divs:
+                    lines.append("| 日期 | 标的 | 每股派现 | 股数 | 税前 | 税后 |")
+                    lines.append("|------|------|---------|------|------|------|")
+                    for d in yr_divs:
+                        lines.append(
+                            f"| {str(d['date'])[:10]} | {d['name']} | "
+                            f"{d['cash_per_share']:.3f} | {d['shares']} | "
+                            f"{d['gross_dividend']:,.0f} | {d['net_dividend']:,.0f} |"
+                        )
+                    lines.append("")
+
+                # 总结反思
+                if commentary:
+                    lines.append(f"#### 📝 交易总结与反思\n")
+                    lines.append(commentary)
+                    lines.append("")
 
         # 交易统计
         lines.append("## 🔄 交易统计\n")
@@ -967,11 +1690,19 @@ class BacktestEngine:
             f.write(content)
         print(f"  💾 回测报告 → {report_path}")
 
-        # 保存净值数据
-        if not nav_df.empty:
+        # 保存净值数据（日线净值）
+        daily_nav_df = self._build_daily_nav(
+            results['period'].split(' ~ ')[0],
+            results['period'].split(' ~ ')[1],
+        )
+        if not daily_nav_df.empty:
+            nav_path = output_dir / "nav_curve.csv"
+            daily_nav_df.to_csv(nav_path, index=False, encoding="utf-8")
+            print(f"  💾 净值曲线(日线) → {nav_path} ({len(daily_nav_df)} 条)")
+        elif not nav_df.empty:
             nav_path = output_dir / "nav_curve.csv"
             nav_df.to_csv(nav_path, index=False, encoding="utf-8")
-            print(f"  💾 净值曲线 → {nav_path}")
+            print(f"  💾 净值曲线(调仓日) → {nav_path}")
 
         # 保存全量交易记录
         if not trade_df.empty:

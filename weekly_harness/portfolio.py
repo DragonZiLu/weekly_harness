@@ -46,6 +46,7 @@ class Position:
     current_price: float = 0.0  # 当前价格
     target_weight: float = 0.0  # 目标权重 (0-1)
     current_weight: float = 0.0  # 当前权重 (0-1)
+    buy_lots: List[Dict] = field(default_factory=list)  # 买入批次，用于分红归属
 
     @property
     def market_value(self) -> float:
@@ -129,6 +130,19 @@ class Portfolio:
     def set_date(self, date: str):
         """设置当前日期"""
         self.current_date = date
+
+    def shares_held_before(self, ts_code: str, date: str) -> int:
+        """获取指定日期前已持有的股数（用于除权日前持股判断）"""
+        pos = self.positions.get(ts_code)
+        if not pos or pos.shares <= 0:
+            return 0
+        if not pos.buy_lots:
+            return pos.shares
+        return sum(
+            int(lot.get("shares", 0))
+            for lot in pos.buy_lots
+            if str(lot.get("date", "")) < date
+        )
 
     def record_nav(self):
         """记录当前净值"""
@@ -238,6 +252,7 @@ class Portfolio:
             pos.cost_price = total_cost_basis / pos.shares
             pos.current_price = price
             pos.category = category
+            pos.buy_lots.append({"date": self.current_date, "shares": shares})
         else:
             self.positions[ts_code] = Position(
                 ts_code=ts_code,
@@ -246,6 +261,7 @@ class Portfolio:
                 shares=shares,
                 cost_price=actual_price,
                 current_price=price,
+                buy_lots=[{"date": self.current_date, "shares": shares}],
             )
 
         trade = Trade(
@@ -309,6 +325,7 @@ class Portfolio:
         # 更新持仓
         pos.shares -= sell_shares
         pos.current_price = price
+        self._reduce_buy_lots(pos, sell_shares)
         if pos.shares <= 0:
             pos.shares = 0
             pos.cost_price = 0.0
@@ -328,12 +345,30 @@ class Portfolio:
         self.trades.append(trade)
         return trade
 
+    def _reduce_buy_lots(self, pos: Position, sell_shares: int):
+        """卖出时按 FIFO 扣减买入批次，保持分红归属股数正确。"""
+        remaining = sell_shares
+        new_lots = []
+        for lot in pos.buy_lots:
+            lot_shares = int(lot.get("shares", 0))
+            if remaining <= 0:
+                new_lots.append(lot)
+            elif lot_shares <= remaining:
+                remaining -= lot_shares
+            else:
+                lot = dict(lot)
+                lot["shares"] = lot_shares - remaining
+                new_lots.append(lot)
+                remaining = 0
+        pos.buy_lots = new_lots
+
     def receive_dividend(
         self,
         ts_code: str,
         name: str,
         cash_per_share: float,
         tax_rate: float = 0.0,
+        shares: Optional[int] = None,
     ) -> Optional[Dict]:
         """
         接收现金分红
@@ -344,6 +379,7 @@ class Portfolio:
         name : str
         cash_per_share : float — 每股派现金额（税前，A股单位：元）
         tax_rate : float — 红利税率（默认0%，持股超1年免税）
+        shares : int or None — 可参与分红的股数，None 表示当前全部持仓
 
         Returns
         -------
@@ -355,9 +391,12 @@ class Portfolio:
         pos = self.positions[ts_code]
         if pos.shares <= 0:
             return None
+        dividend_shares = pos.shares if shares is None else min(shares, pos.shares)
+        if dividend_shares <= 0:
+            return None
 
         # 税后分红
-        gross_dividend = cash_per_share * pos.shares
+        gross_dividend = cash_per_share * dividend_shares
         tax = gross_dividend * tax_rate
         net_dividend = gross_dividend - tax
 
@@ -371,7 +410,7 @@ class Portfolio:
             "date": self.current_date,
             "ts_code": ts_code,
             "name": name,
-            "shares": pos.shares,
+            "shares": dividend_shares,
             "cash_per_share": cash_per_share,
             "gross_dividend": round(gross_dividend, 2),
             "tax": round(tax, 2),
@@ -452,6 +491,7 @@ class Portfolio:
                     "shares": pos.shares,
                     "cost_price": pos.cost_price,
                     "current_price": pos.current_price,
+                    "buy_lots": pos.buy_lots,
                 }
                 for code, pos in self.positions.items()
             },
