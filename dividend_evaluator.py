@@ -95,7 +95,7 @@ COMPANIES = {
     },
     "保险": {
         "中国平安": {"ts_code": "601318.SH", "category": "弱周期红利", "certainty": "A-",
-                   "moat": "综合金融帝国·保险+银行+资管", "comment": "保险龙头，分红稳定增长，估值低位"},
+                   "moat": "综合金融帝国·保险+银行+资管", "comment": "保险龙头，54以下攒股，预期26年分红≥2.8元"},
     },
     # ── 第二类：消费/成长红利 ─────────────────────────────────
     "家电": {
@@ -126,7 +126,8 @@ COMPANIES = {
     # ── 第三类：周期资源红利 ─────────────────────────────────
     "矿业": {
         "紫金矿业": {"ts_code": "601899.SH", "category": "周期资源红利", "certainty": "B+",
-                   "moat": "全球黄金/铜矿储量增长", "comment": "黄金4000/铜11000中枢，周期+成长"},
+                   "moat": "全球黄金/铜矿储量增长", "comment": "黄金4000/铜11000中枢，网格30/28/26，周期+成长"},
+
     },
     "石油": {
         "中国海油": {"ts_code": "600938.SH", "category": "周期资源红利", "certainty": "B+",
@@ -137,6 +138,12 @@ COMPANIES = {
                    "moat": "优质煤矿资源·低成本", "comment": "熊市表现佳，高股息防御性强"},
         "中国神华": {"ts_code": "601088.SH", "category": "周期资源红利", "certainty": "B+",
                    "moat": "煤电运一体化·全产业链", "comment": "煤炭龙头，一体化壁垒，分红率超70%"},
+    },
+    "火电": {
+        "华能国际": {"ts_code": "600011.SH", "category": "周期资源红利", "certainty": "B",
+                   "moat": "火电龙头·煤价反向标的", "comment": "煤价跌利润弹，与煤炭天然对冲"},
+        "华电国际": {"ts_code": "600027.SH", "category": "周期资源红利", "certainty": "B",
+                   "moat": "火电央企·煤电联营", "comment": "煤电联营平滑周期，分红提升中"},
     },
 }
 
@@ -189,8 +196,8 @@ SECTOR_THRESHOLDS = {
         "comment": "百年品牌5%+可布局，6%+极佳",
     },
     "矿业": {
-        "watch": 2.0, "buy": 3.0, "add": 4.0, "full": 5.0, "reduce": 1.5,
-        "comment": "成长型矿业，低股息但高增速",
+        "watch": 2.0, "buy": 3.0, "add": 3.5, "full": 4.0, "reduce": 1.5,
+        "comment": "周期+成长型矿业，3%安全边际线，3.5%+低估，4%+极佳买点",
     },
     "石油": {
         "watch": 4.0, "buy": 5.0, "add": 6.0, "full": 7.0, "reduce": 3.5,
@@ -200,6 +207,11 @@ SECTOR_THRESHOLDS = {
         "watch": 5.0, "buy": 7.0, "add": 8.0, "full": 10.0, "reduce": 4.5,
         "comment": "煤炭10%+历史极值，7%+可建仓",
     },
+    "火电": {
+        "watch": 3.5, "buy": 4.5, "add": 5.5, "full": 6.5, "reduce": 3.0,
+        "comment": "煤价跌利好火电，5%+可加仓，与煤炭天然对冲",
+    },
+
     "ETF": {
         "watch": 3.5, "buy": 4.0, "add": 4.5, "full": 5.0, "reduce": 3.0,
         "comment": "ETF分散投资，4%+即可攒股",
@@ -212,6 +224,27 @@ HEDGE_PAIRS = {
     "煤炭": "火电",   # 煤炭↔火电天然对冲
     "银行": "保险",   # 金融板块内均衡
     "石油": "化工",   # 上下游对冲
+
+}
+
+# ── 行业生命周期 ──────────────────────────────────────────────
+# 成熟/夕阳行业的资本开支结束 → 自由现金流充裕 → 分红率提升 → 分红奶牛
+# 关键信号：增速为负/零 + 分红率提升 = 分红奶牛信号
+SECTOR_LIFECYCLE = {
+    # 行业: { "stage": 阶段, "capex_trend": 资本开支趋势, "dividend_potential": 分红潜力 }
+    "水电":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "高", "comment": "大坝建成，资本开支低，自由现金流充沛"},
+    "运营商": {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "高", "comment": "5G建设高峰已过，进入收获期"},
+    "银行":   {"stage": "成熟",   "capex_trend": "无",   "dividend_potential": "高", "comment": "无资本开支，利润直接分红"},
+    "保险":   {"stage": "成熟",   "capex_trend": "无",   "dividend_potential": "中", "comment": "综合金融，分红稳定"},
+    "家电":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "竞争格局稳定，龙头回购+分红"},
+    "白酒":   {"stage": "成熟",   "capex_trend": "低",   "dividend_potential": "高", "comment": "品牌护城河，极低资本开支"},
+    "中药":   {"stage": "成熟",   "capex_trend": "低",   "dividend_potential": "中", "comment": "品牌溢价，分红率可提升"},
+    "矿业":   {"stage": "成长",   "capex_trend": "高",   "dividend_potential": "低", "comment": "扩产周期，资本开支大；待高峰后分红率可升至50%"},
+    "石油":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "能源转型期，维持产量为主"},
+    "煤炭":   {"stage": "夕阳转奶牛", "capex_trend": "下降", "dividend_potential": "极高", "comment": "资本开支结束→分红率70%+，典型夕阳→奶牛"},
+    "火电":   {"stage": "转型",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "煤电转型期，电价市场化提升利润弹性"},
+
+    "ETF":   {"stage": "N/A",    "capex_trend": "N/A",  "dividend_potential": "N/A", "comment": "被动投资"},
 }
 
 # 网络补充数据（tushare 缺失时使用，2026-05-22 数据）
@@ -440,6 +473,7 @@ FALLBACK_DATA = {
         "payout_ratio": 65.0, "total_mv": 1352.0,
         "note": "2025全年分红5.775元/股(中期1.358+年报预案4.417)，股息率6.29%；国窖1573放量，高端化趋势明确"
     },
+
 }
 
 
@@ -1197,6 +1231,19 @@ class DividendCycleEvaluator:
         s5, r5 = self.score_growth(data["roe"], data["net_profit_growth"], category)
 
         total = s1 + s2 + s3 + s4 + s5
+
+        # ── 新增：分红奶牛信号（夕阳产业→分红奶牛） ──
+        dividend_cow = self._calc_dividend_cow_signal(
+            sector=sector,
+            payout_ratio=data.get("payout_ratio", 0),
+            net_profit_growth=data.get("net_profit_growth", 0),
+            div_yield=data["div_yield"],
+        )
+
+        # 分红奶牛加分（最多+5分，总封顶100）
+        cow_bonus = dividend_cow.get("bonus", 0)
+        total = min(100, total + cow_bonus)
+
         verdict, advice = self._get_verdict(total, data["div_yield"], category)
 
         # 分红复投10年预测
@@ -1250,6 +1297,8 @@ class DividendCycleEvaluator:
             "forward_div_yield": forward_div["forward_div_yield"],
             "forward_dps": forward_div["forward_dps"],
             "grid": grid,
+            # ── 新增字段 ──
+            "dividend_cow": dividend_cow,
             # ── 自验证透传字段（供 Validator 交叉核对，不用于评分）──
             "_div_self_calc":  data.get("_div_self_calc"),
             "_div_dv_ttm":     data.get("_div_dv_ttm"),
@@ -1355,6 +1404,70 @@ class DividendCycleEvaluator:
             "buy_line": buy_line,
             "reduce_line": reduce_line,
             "desc": desc,
+        }
+
+    def _calc_dividend_cow_signal(
+        self, sector: str, payout_ratio: float,
+        net_profit_growth: float, div_yield: float
+    ) -> Dict:
+        """
+        分红奶牛信号（夕阳产业→分红奶牛）
+
+        逻辑：行业进入成熟/衰退期后：
+          1. 资本开支下降 → 自由现金流充裕
+          2. 增长机会减少 → 分红率提升
+          3. 典型案例：煤炭行业资本开支结束→分红率70%+
+
+        信号强度：
+          - 强信号：夕阳转奶牛 + 分红率≥60% + 增速≤0 + 高股息率
+          - 中信号：成熟行业 + 分红率≥50% + 增速≤5%
+          - 弱信号：成熟行业 + 分红率≥40%
+
+        加分规则（最多+5分）：
+          - 强信号：+5
+          - 中信号：+3
+          - 弱信号：+1
+        """
+        lifecycle = SECTOR_LIFECYCLE.get(sector, {})
+        stage = lifecycle.get("stage", "")
+        dividend_potential = lifecycle.get("dividend_potential", "低")
+
+        signal = "无"
+        bonus = 0
+        reason = ""
+
+        # 强信号：夕阳转奶牛 + 高分红率 + 低/负增速 + 高股息
+        if stage == "夕阳转奶牛":
+            if payout_ratio >= 60 and div_yield >= 5.0:
+                signal = "强"
+                bonus = 5
+                reason = f"夕阳→奶牛：资本开支结束，分红率{payout_ratio:.0f}%，股息率{div_yield:.1f}%"
+            elif payout_ratio >= 50:
+                signal = "中"
+                bonus = 3
+                reason = f"夕阳→奶牛倾向：分红率{payout_ratio:.0f}%，增速{net_profit_growth:.1f}%"
+            else:
+                signal = "弱"
+                bonus = 1
+                reason = f"夕阳行业，分红率{payout_ratio:.0f}%，奶牛潜力待释放"
+
+        # 成熟行业 + 分红率高 → 分红奶牛倾向
+        elif stage == "成熟" and dividend_potential in ("高", "极高"):
+            if payout_ratio >= 50 and net_profit_growth <= 5:
+                signal = "中"
+                bonus = 3
+                reason = f"成熟行业奶牛：分红率{payout_ratio:.0f}%，增速{net_profit_growth:.1f}%"
+            elif payout_ratio >= 40:
+                signal = "弱"
+                bonus = 1
+                reason = f"成熟行业：分红率{payout_ratio:.0f}%，奶牛潜力中等"
+
+        return {
+            "signal": signal,
+            "bonus": bonus,
+            "reason": reason,
+            "stage": stage,
+            "dividend_potential": dividend_potential,
         }
 
     def _drip_projection(self, initial_yield: float, years: int) -> Dict:

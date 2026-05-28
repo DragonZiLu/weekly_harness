@@ -38,6 +38,13 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+# ── 行业对冲组合（从 dividend_evaluator 同步）────────────────────
+HEDGE_PAIRS = {
+    "煤炭": "火电",   # 煤炭↔火电天然对冲：煤价跌利好火电、煤价涨利好煤炭
+    "银行": "保险",   # 金融板块内均衡
+    "石油": "化工",   # 上下游对冲
+}
+
 
 # ─── 策略参数 ──────────────────────────────────────────────────
 
@@ -72,6 +79,10 @@ class StrategyParams:
     max_positions: int = 12           # 最大持仓数
     cash_reserve: float = 0.05       # 最低现金保留比例
 
+    # ── 对冲参数 ──
+    hedge_enabled: bool = True       # 是否启用行业对冲约束
+    hedge_ratio: float = 0.5         # 对冲比例（持有行业A时，配对行业B至少配A权重的hedge_ratio倍）
+
 
 # ─── 调仓指令 ──────────────────────────────────────────────────
 
@@ -88,6 +99,7 @@ class RebalanceAction:
     score: float             # 当前评分
     verdict: str             # 信号
     reason: str = ""        # 调仓原因
+    hedge_for: str = ""     # 对冲来源行业（如"火电"的hedge_for="煤炭"）
 
     @property
     def is_trade(self) -> bool:
@@ -199,6 +211,67 @@ class DividendCycleStrategy:
 
         return raw_targets
 
+    def _apply_hedge_constraints(
+        self,
+        raw_targets: Dict[str, float],
+        scores: Dict[str, Dict],
+    ) -> Tuple[Dict[str, float], Dict[str, float]]:
+        """
+        应用行业对冲约束
+
+        逻辑：如果持有行业A（如煤炭），配对行业B（如火电）至少配 A权重 × hedge_ratio
+        这是软约束——仅在配对行业有合格标的（评分≥观察线）时才激活
+
+        Returns
+        -------
+        Tuple[adjusted_targets, hedge_deltas]
+            adjusted_targets: 调整后的权重
+            hedge_deltas: 各标的因对冲新增的权重 {ts_code: delta}
+        """
+        p = self.params
+        if not p.hedge_enabled:
+            return raw_targets, {}
+
+        adjusted = dict(raw_targets)
+        hedge_deltas: Dict[str, float] = {}
+
+        # 按行业分组权重
+        sector_weights: Dict[str, float] = {}
+        sector_stocks: Dict[str, List[str]] = {}
+        for ts_code, weight in adjusted.items():
+            sector = scores.get(ts_code, {}).get("sector", "")
+            if sector:
+                sector_weights[sector] = sector_weights.get(sector, 0) + weight
+                sector_stocks.setdefault(sector, []).append(ts_code)
+
+        # 对冲逻辑：对每个行业检查配对行业权重
+        for sector_a, sector_b in HEDGE_PAIRS.items():
+            weight_a = sector_weights.get(sector_a, 0)
+            weight_b = sector_weights.get(sector_b, 0)
+            min_weight_b = weight_a * p.hedge_ratio
+
+            # 仅当行业A有持仓且行业B权重不足时触发
+            if weight_a > 0 and weight_b < min_weight_b:
+                # 找行业B中合格的标的（评分≥观察线=50）
+                b_stocks = sector_stocks.get(sector_b, [])
+                eligible = [c for c in b_stocks if scores.get(c, {}).get("total_score", 0) >= p.score_watch]
+
+                if not eligible:
+                    continue  # 无合格标的，不强制
+
+                # 按评分排序，优先给高分的加权重
+                eligible.sort(key=lambda c: scores.get(c, {}).get("total_score", 0), reverse=True)
+                deficit = min_weight_b - weight_b
+
+                # 分配对冲权重：优先给评分最高的标的
+                per_stock = deficit / len(eligible)
+                for ts_code in eligible:
+                    current = adjusted.get(ts_code, 0)
+                    adjusted[ts_code] = current + per_stock
+                    hedge_deltas[ts_code] = hedge_deltas.get(ts_code, 0) + per_stock
+
+        return adjusted, hedge_deltas
+
     def generate_rebalance_actions(
         self,
         scores: Dict[str, Dict],
@@ -230,8 +303,14 @@ class DividendCycleStrategy:
         # Step 2: 类别约束
         adjusted = self._apply_category_constraints(raw_targets, scores)
 
-        # Step 3: 硬约束
-        final_targets = self._apply_hard_constraints(adjusted)
+        # Step 3: 行业对冲约束
+        hedged, hedge_deltas = self._apply_hedge_constraints(adjusted, scores)
+
+        # Step 3.5: 对冲加仓后重新检查类别约束（防止对冲增量突破类别上限）
+        final_cat = self._apply_category_constraints(hedged, scores)
+
+        # Step 4: 硬约束
+        final_targets = self._apply_hard_constraints(final_cat)
 
         # Step 4: 生成调仓指令
         actions = []
@@ -251,6 +330,23 @@ class DividendCycleStrategy:
             # 构建详细理由
             score_desc = f"评分{score_val:.0f}({verdict})"
             yield_desc = f"股息率{div_yield:.2f}%" if div_yield > 0 else ""
+
+            # 判断是否因对冲加仓（仅当该标的有真实的对冲增量时才标注）
+            hedge_for = ""
+            hedge_reason = ""
+            if ts_code in hedge_deltas and hedge_deltas[ts_code] > 0:
+                sector = scores.get(ts_code, {}).get("sector", "")
+                for sector_a, sector_b in HEDGE_PAIRS.items():
+                    if sector == sector_b:
+                        hedge_for = sector_a
+                        pair_weight = sum(
+                            final_targets.get(c, 0)
+                            for c, sd in scores.items()
+                            if sd.get("sector", "") == sector_a
+                        )
+                        if pair_weight > 0:
+                            hedge_reason = f"，对冲{sector_a}持仓{pair_weight*100:.1f}%"
+                        break
 
             # 判断动作
             if abs(delta) < p.rebalance_threshold:
@@ -288,7 +384,8 @@ class DividendCycleStrategy:
                 weight_delta=delta,
                 score=score_val,
                 verdict=verdict,
-                reason=reason,
+                reason=reason + hedge_reason,
+                hedge_for=hedge_for,
             ))
 
         # 按优先级排序：先卖后买（卖出释放资金）

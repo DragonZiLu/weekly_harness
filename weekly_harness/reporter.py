@@ -23,6 +23,8 @@ from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import numpy as np
+import os
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib_cache")
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -531,8 +533,16 @@ class WeeklyReporter:
         signals: Dict,
         history: pd.DataFrame,
         week_dir: Path,
+        market_signals: Optional[Dict] = None,
     ) -> str:
-        """生成 Markdown 周报"""
+        """生成 Markdown 周报
+        
+        Parameters
+        ----------
+        market_signals : dict, optional
+            预获取的市场信号（来自 MarketSignals.get_all_signals()）。
+            若不传则自动获取，获取失败时优雅降级（不输出市场环境章节）。
+        """
         week = raw_scores.get("week", "?")
         bond_yield = raw_scores.get("bond_yield_10y", 1.65)
         scores = raw_scores.get("scores", {})
@@ -550,6 +560,52 @@ class WeeklyReporter:
             f"> **评估股票数量**: {len(scores)} 只  \n",
             "---\n",
         ]
+
+        # ── 市场环境（板块轮动 + 牛熊周期） ──
+        try:
+            if market_signals is None:
+                from weekly_harness.market_signals import MarketSignals
+                from config.settings import tushare_cfg
+                ms = MarketSignals(tushare_token=tushare_cfg.token)
+                market_signals = ms.get_all_signals()
+            rotation = market_signals["rotation"]
+            bullbear = market_signals["bullbear"]
+            position_suggestion = market_signals["position_suggestion"]
+
+            lines.append("## 🌐 市场环境\n")
+
+            # 板块轮动
+            style_icons = {"红利": "🔴", "成长": "🟢", "均衡": "⚪"}
+            style_icon = style_icons.get(rotation.style, "⚪")
+            lines.append(f"### 板块轮动信号\n")
+            lines.append(f"| 指标 | 值 |")
+            lines.append(f"|------|-----|")
+            lines.append(f"| 当前强势风格 | {style_icon} **{rotation.style}** |")
+            lines.append(f"| 轮动强度 | {rotation.strength:.0%} |")
+            lines.append(f"| 原因 | {rotation.reason} |")
+            lines.append(f"| 操作建议 | {rotation.suggestion} |")
+            lines.append("")
+
+            # 牛熊周期
+            phase_icons = {"牛市": "🐂", "熊市": "🐻", "震荡": "↔️"}
+            phase_icon = phase_icons.get(bullbear.phase, "↔️")
+            lines.append(f"### 牛熊周期信号\n")
+            lines.append(f"| 指标 | 值 |")
+            lines.append(f"|------|-----|")
+            lines.append(f"| 当前周期 | {phase_icon} **{bullbear.phase}** |")
+            lines.append(f"| 信心度 | {bullbear.confidence:.0%} |")
+            lines.append(f"| 原因 | {bullbear.reason} |")
+            lines.append(f"| 操作建议 | {bullbear.suggestion} |")
+            lines.append("")
+
+            # 综合仓位建议
+            pos_icons = {"加仓": "🟢", "减仓": "🔴", "谨慎加仓": "🟡", "谨慎减仓": "🟡", "正常": "⚪"}
+            pos_icon = pos_icons.get(position_suggestion, "⚪")
+            lines.append(f"> 🎯 **综合仓位建议**: {pos_icon} **{position_suggestion}**\n")
+            lines.append("---\n")
+
+        except Exception as e:
+            lines.append(f"<!-- 市场环境信号获取失败: {e} -->\n")
 
         # ── 信号摘要 ──
         lines.append("## 🚦 本周信号摘要\n")
@@ -696,10 +752,26 @@ class WeeklyReporter:
                     zone_icon = {"低吸": "🟢", "持有": "🟡", "减仓": "🔴"}.get(grid["zone"], "⚪")
                     lines.append(f"**网格交易**: {zone_icon} **{grid['zone']}区** — {grid['desc']}\n")
 
+                # ── 分红奶牛信号 ──
+                cow = s.get("dividend_cow", {})
+                if cow and cow.get("signal") != "无":
+                    cow_icons = {"强": "🐄", "中": "🥛", "弱": "💊"}
+                    icon = cow_icons.get(cow["signal"], "")
+                    lines.append(f"{icon} **分红奶牛信号**（{cow['signal']}）: {cow.get('reason', '')}\n")
+
                 # ── 行业对冲提示 ──
                 sector = s.get("sector", "")
+                hedge_sector = None
+                hedge_desc = ""
                 if sector in HEDGE_PAIRS:
                     hedge_sector = HEDGE_PAIRS[sector]
+                else:
+                    # 反向查找：火电 → 煤炭
+                    for k, v in HEDGE_PAIRS.items():
+                        if v == sector:
+                            hedge_sector = k
+                            break
+                if hedge_sector:
                     hedge_names = []
                     for ts, sc in scores.items():
                         if sc.get("sector") == hedge_sector:
@@ -708,7 +780,9 @@ class WeeklyReporter:
                         # 根据对冲组合给出不同的描述
                         hedge_descs = {
                             "煤炭": "煤价跌利好火电、煤价涨利好煤炭",
+                            "火电": "煤价跌利好火电、煤价涨利好煤炭",
                             "银行": "金融板块内均衡配置",
+                            "保险": "金融板块内均衡配置",
                             "石油": "上下游对冲",
                         }
                         desc = hedge_descs.get(sector, "天然对冲，分散风险")
@@ -989,6 +1063,7 @@ class WeeklyReporter:
         validation: Dict,
         artifacts_dir: Optional[Path] = None,
         force: bool = False,
+        market_signals: Optional[Dict] = None,
     ) -> Dict:
         """
         执行周报生成
@@ -1003,6 +1078,9 @@ class WeeklyReporter:
             artifact 输出目录
         force : bool, optional
             强制覆盖该周全部历史数据（默认 upsert 模式）
+        market_signals : dict, optional
+            预获取的市场信号（来自 MarketSignals.get_all_signals()）。
+            若不传则自动获取，获取失败时优雅降级。
 
         Returns
         -------
@@ -1025,7 +1103,7 @@ class WeeklyReporter:
         signals = self._detect_signals(raw_scores, history)
 
         # 生成 Markdown 周报
-        self._generate_markdown(raw_scores, validation, signals, history, week_dir)
+        self._generate_markdown(raw_scores, validation, signals, history, week_dir, market_signals=market_signals)
 
         # 生成可视化图表
         self._generate_chart(raw_scores, history, week_dir)

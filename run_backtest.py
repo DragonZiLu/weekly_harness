@@ -140,7 +140,7 @@ def main():
     parser.add_argument("--start", default="2024-01-01", help="回测开始日期 (默认: 2024-01-01)")
     parser.add_argument("--end", default=datetime.now().strftime("%Y-%m-%d"), help="回测结束日期 (默认: 今天)")
     parser.add_argument("--cash", type=float, default=1000000, help="初始资金 (默认: 100万)")
-    parser.add_argument("--benchmark", default="000300.SH", help="基准指数 (默认: 沪深300)")
+    parser.add_argument("--benchmark", default="000300.SH,515180.SH", help="基准指数，逗号分隔多基准 (默认: 沪深300,易方达红利ETF)")
     parser.add_argument("--freq", default="quarterly", choices=["quarterly", "weekly"],
                         help="调仓频率: quarterly=季度, weekly=周度 (默认: quarterly)")
 

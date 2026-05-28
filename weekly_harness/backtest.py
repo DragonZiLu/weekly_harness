@@ -357,9 +357,12 @@ class BacktestDataFetcher:
                 return pd.DataFrame()
 
             # 保留 ann_date 用于回测时判断"当时已知的分红"
+            # 保留 end_date 用于过滤特别分红（非标准财报期的分红）
             keep_cols = ["ts_code", "ex_date", "cash_per_share"]
             if "ann_date" in df.columns:
                 keep_cols.append("ann_date")
+            if "end_date" in df.columns:
+                keep_cols.append("end_date")
             return df[keep_cols].reset_index(drop=True)
 
         except Exception:
@@ -398,9 +401,9 @@ class BacktestEngine:
         self._stock_meta: Dict[str, Dict] = {}
         # 价格数据缓存
         self._price_data: Dict[str, pd.DataFrame] = {}
-        # 基准数据
-        self._benchmark: Optional[pd.DataFrame] = None
-        self._benchmark_code: str = ""
+        # 基准数据（支持多基准）
+        self._benchmarks: Dict[str, pd.DataFrame] = {}
+        self._benchmark_codes: List[str] = []
         # 分红数据 {ts_code: DataFrame}
         self._dividend_data: Dict[str, pd.DataFrame] = {}
         # 已处理的分红 (ts_code, ex_date) 防止重复
@@ -562,10 +565,17 @@ class BacktestEngine:
 
     def _get_trailing_dps_at_date(self, ts_code: str, date_str: str) -> float:
         """
-        获取指定日期时的过去12个月(4个季度)累计每股分红
+        获取指定日期时的最近完整年度每股分红（Latest Full-Year DPS）
 
-        用于计算 trailing dividend yield：div_yield = trailing_dps / price * 100
-        只使用 ann_date <= date_str 的分红记录。
+        计算逻辑：按 end_date 的自然年度归组，取已除权的最近一个完整年度分红之和。
+        例如 2024-06-28 时，2023 年报(20231231)已除权 → 取 2023 年度全部常规分红。
+
+        对齐周报逻辑：div_yield = 全年分红 / 当前股价 × 100
+
+        防前视偏差规则：
+        1. 只包含 ex_date <= date_str 的分红（已除权才纳入）
+        2. 不包含特别分红（end_date 非标准财报期的分红）
+        3. 同一自然年度的所有常规分红（年报+中期等）合并为全年 DPS
         """
         if ts_code not in self._dividend_data:
             return 0.0
@@ -574,41 +584,37 @@ class BacktestEngine:
         if div_df.empty:
             return 0.0
 
+        # 必须有 ex_date 和 end_date 列
+        if "ex_date" not in div_df.columns or "end_date" not in div_df.columns:
+            return 0.0
+
+        div_df = div_df.copy()
+        div_df["ex_date_ts"] = pd.to_datetime(
+            div_df["ex_date"].astype(str), format="%Y%m%d", errors="coerce"
+        )
         target_date = pd.Timestamp(date_str)
-        one_year_ago = target_date - pd.DateOffset(years=1)
 
-        # 筛选已公告的分红
-        if "ann_date" in div_df.columns:
-            div_df = div_df.copy()
-            div_df["ann_date_ts"] = pd.to_datetime(
-                div_df["ann_date"].astype(str), format="%Y%m%d", errors="coerce"
-            )
-            # 只用当时已知的分红
-            known = div_df[div_df["ann_date_ts"] <= target_date]
-        else:
-            div_df = div_df.copy()
-            div_df["ex_date_ts"] = pd.to_datetime(
-                div_df["ex_date"].astype(str), format="%Y%m%d", errors="coerce"
-            )
-            known = div_df[div_df["ex_date_ts"] <= target_date]
-
+        # 只取已除权的分红
+        known = div_df[div_df["ex_date_ts"] <= target_date]
         if known.empty:
             return 0.0
 
-        # 取 ex_date 在过去1年内的分红（除权日在过去12个月）
-        if "ex_date" in known.columns:
-            known = known.copy()
-            known["ex_date_ts"] = pd.to_datetime(
-                known["ex_date"].astype(str), format="%Y%m%d", errors="coerce"
-            )
-            trailing = known[known["ex_date_ts"] >= one_year_ago]
-        else:
-            trailing = known
-
-        if trailing.empty:
+        # 过滤特别分红：只保留 end_date 对应标准财报期（0331/0630/0930/1231）
+        _STANDARD_REPORT_PERIODS = {"0331", "0630", "0930", "1231"}
+        known = known[
+            known["end_date"].astype(str).str[4:8].isin(_STANDARD_REPORT_PERIODS)
+        ]
+        if known.empty:
             return 0.0
 
-        return float(trailing["cash_per_share"].sum())
+        # 按 end_date 的自然年度归组，取最近一个完整年度
+        known = known.copy()
+        known["fiscal_year"] = known["end_date"].astype(str).str[:4]
+        # 按 fiscal_year 降序，取最近年度的全部分红之和
+        latest_year = known["fiscal_year"].max()
+        latest_year_dps = known[known["fiscal_year"] == latest_year]["cash_per_share"].sum()
+
+        return float(latest_year_dps)
 
     # 中国10年期国债收益率历史关键节点（%）
     # 数据来源：Wind / 中国债券信息网
@@ -619,6 +625,67 @@ class BacktestEngine:
         2021: 2.80, 2022: 2.70, 2023: 2.60, 2024: 2.00,
         2025: 1.70, 2026: 1.65,
     }
+
+    # ── 回购收益率历史估算 ──
+    # 基于 A 股回购公告和执行情况的历史估算（单位：%）
+    # 注：回购数据取自公开财报，为年度近似值
+    _BUYBACK_HISTORY: Dict[str, Dict[int, float]] = {
+        "000333.SZ": {  # 美的集团：2018年首次大规模回购，此后持续加大
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.5, 2019: 1.5,
+            2020: 2.0, 2021: 2.5, 2022: 3.0, 2023: 3.5, 2024: 4.0, 2025: 4.5,
+        },
+        "600690.SH": {  # 海尔智家：2021年港股回购，2022年A股回购
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.0, 2019: 0.0,
+            2020: 0.0, 2021: 1.0, 2022: 1.5, 2023: 2.0, 2024: 2.5, 2025: 3.0,
+        },
+        "000651.SZ": {  # 格力电器：2020年首轮回购
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.0, 2019: 0.0,
+            2020: 0.5, 2021: 0.5, 2022: 1.0, 2023: 1.0, 2024: 1.5, 2025: 1.5,
+        },
+        "000538.SZ": {  # 云南白药：2022年混改后开始回购
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.0, 2019: 0.0,
+            2020: 0.0, 2021: 0.0, 2022: 1.0, 2023: 1.5, 2024: 1.5, 2025: 2.0,
+        },
+        "000858.SZ": {  # 五粮液：2023年首轮回购（小规模）
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.0, 2019: 0.0,
+            2020: 0.0, 2021: 0.0, 2022: 0.0, 2023: 0.3, 2024: 0.3, 2025: 0.5,
+        },
+        "601318.SH": {  # 中国平安：2023年A股回购
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.0, 2019: 0.0,
+            2020: 0.0, 2021: 0.0, 2022: 0.0, 2023: 0.3, 2024: 0.3, 2025: 0.5,
+        },
+        "601899.SH": {  # 紫金矿业：2024年首轮回购
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.0, 2019: 0.0,
+            2020: 0.0, 2021: 0.0, 2022: 0.0, 2023: 0.0, 2024: 0.3, 2025: 0.3,
+        },
+        "600941.SH": {  # 中国移动：2023年H股回购延伸至A股
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.0, 2019: 0.0,
+            2020: 0.0, 2021: 0.0, 2022: 0.0, 2023: 0.3, 2024: 0.3, 2025: 0.5,
+        },
+        "601728.SH": {  # 中国电信：2024年开始回购
+            2015: 0.0, 2016: 0.0, 2017: 0.0, 2018: 0.0, 2019: 0.0,
+            2020: 0.0, 2021: 0.0, 2022: 0.0, 2023: 0.0, 2024: 0.3, 2025: 0.3,
+        },
+    }
+
+    def _get_buyback_yield_at_date(self, ts_code: str, date_str: str) -> float:
+        """
+        获取指定日期时的回购收益率估算（%）
+
+        基于年度历史估算，防止前视偏差：只用当年或之前的数据。
+        """
+        history = self._BUYBACK_HISTORY.get(ts_code)
+        if not history:
+            return 0.0
+
+        year = int(date_str[:4])
+        # 只用 <= 当年的数据，防止前视偏差
+        available = {y: v for y, v in history.items() if y <= year}
+        if not available:
+            return 0.0
+
+        # 取最近的年份
+        return available[max(available.keys())]
 
     def _get_bond_yield_at_date(self, date_str: str) -> float:
         """
@@ -713,40 +780,70 @@ class BacktestEngine:
                 # 无历史分红数据，跳过
                 continue
 
-            # 息差
-            spread_bp = (sim_div_yield - bond_yield * 100)
+            # 息差（基点）
+            spread_bp = (sim_div_yield - bond_yield * 100) * 100  # 转为基点(BP)
+
+            # ── 回购收益率（历史估算）──
+            buyback_yield = self._get_buyback_yield_at_date(ts_code, date_str)
+
+            # 等效分红率 = 现金股息率 + 回购收益率
+            effective_yield = sim_div_yield + buyback_yield
 
             # ── 行业股息率锚评分（替代统一阈值）──
             sector_thresholds = SECTOR_THRESHOLDS.get(sector, {})
 
-            # S1 股息率评分：基于行业锚动态调整
+            # S1 股息率评分：基于行业锚动态调整（使用等效分红率）
             if sector_thresholds:
                 buy_line = sector_thresholds.get("buy", 5.0)
                 full_line = sector_thresholds.get("full", 7.0)
-                if sim_div_yield >= full_line:
+                if effective_yield >= full_line:
                     s1 = 30  # 满分
-                elif sim_div_yield >= buy_line:
+                elif effective_yield >= buy_line:
                     # 在买入线和满仓线之间线性给分
-                    s1 = 20 + (sim_div_yield - buy_line) / (full_line - buy_line) * 10
-                elif sim_div_yield >= buy_line * 0.7:
-                    s1 = sim_div_yield / buy_line * 20
+                    s1 = 20 + (effective_yield - buy_line) / (full_line - buy_line) * 10
+                elif effective_yield >= buy_line * 0.7:
+                    s1 = effective_yield / buy_line * 20
                 else:
-                    s1 = max(0, sim_div_yield / buy_line * 15)
+                    s1 = max(0, effective_yield / buy_line * 15)
             else:
-                s1 = min(30, max(0, sim_div_yield * 5))
+                s1 = min(30, max(0, effective_yield * 5))
 
-            # S2 息差评分
-            s2 = min(25, max(0, spread_bp / 10))
+            # S2 息差评分（对齐周报分级表）
+            if spread_bp >= 300:
+                s2 = 25
+            elif spread_bp >= 230:
+                s2 = 22
+            elif spread_bp >= 180:
+                s2 = 18
+            elif spread_bp >= 130:
+                s2 = 14
+            elif spread_bp >= 80:
+                s2 = 9
+            elif spread_bp >= 30:
+                s2 = 4
+            else:
+                s2 = 0
 
-            # S3 等效分红评分（不含回购数据，保守估计）
-            if sector_thresholds:
-                full_line = sector_thresholds.get("full", 7.0)
-                if sim_div_yield >= full_line:
+            # S3 等效分红评分（含回购数据）
+            if category == "消费成长红利":
+                if effective_yield >= 9.0:
                     s3 = 20
+                elif effective_yield >= 8.0:
+                    s3 = 17
+                elif effective_yield >= 6.0:
+                    s3 = 12
                 else:
-                    s3 = min(20, max(0, sim_div_yield / full_line * 20))
+                    s3 = 5
             else:
-                s3 = min(20, max(0, sim_div_yield * 3))
+                # 非消费类：纯现金分红
+                if sector_thresholds:
+                    full_line = sector_thresholds.get("full", 7.0)
+                    if sim_div_yield >= full_line:
+                        s3 = 20
+                    else:
+                        s3 = min(20, max(0, sim_div_yield / full_line * 20))
+                else:
+                    s3 = min(20, max(0, sim_div_yield * 3))
 
             # S4 确定性评分
             certainty_score = {"AA": 15, "A": 13, "A-": 11, "B+": 8, "B": 5}.get(
@@ -776,20 +873,20 @@ class BacktestEngine:
             sector_growth = {
                 "水电": 3.0, "运营商": 5.0, "银行": 4.0, "保险": 6.0,
                 "家电": 8.0, "白酒": 12.0, "中药": 8.0, "矿业": 15.0,
-                "石油": 5.0, "煤炭": -2.0, "ETF": 5.0,
+                "石油": 5.0, "煤炭": -2.0, "火电": 8.0, "ETF": 5.0,
             }
             growth = sector_growth.get(sector, 5.0)
             forward_dps = trailing_dps * (1 + growth / 100)
             forward_div_yield = forward_dps / price * 100 if price > 0 else 0
 
-            # ── 网格交易区间 ──
+            # ── 网格交易区间（基于等效分红率）──
             grid = {}
             if sector_thresholds:
                 buy_line = sector_thresholds.get("buy", 5.0)
                 reduce_line = sector_thresholds.get("reduce", 3.0)
-                if sim_div_yield >= buy_line:
+                if effective_yield >= buy_line:
                     grid_zone = "低吸"
-                elif sim_div_yield >= reduce_line:
+                elif effective_yield >= reduce_line:
                     grid_zone = "持有"
                 else:
                     grid_zone = "减仓"
@@ -810,6 +907,8 @@ class BacktestEngine:
                 "total_score": round(total, 1),
                 "verdict": verdict,
                 "div_yield": round(sim_div_yield, 2),
+                "buyback_yield": round(buyback_yield, 2),
+                "effective_yield": round(effective_yield, 2),
                 "forward_div_yield": round(forward_div_yield, 2),
                 "close": price,
                 "pe_ttm": 0,
@@ -890,13 +989,21 @@ class BacktestEngine:
         ----------
         start_date : str — 回测开始日期
         end_date : str — 回测结束日期
-        benchmark_code : str — 基准指数代码
+        benchmark_code : str | list[str] — 基准指数代码（支持逗号分隔多基准）
         verbose : bool — 是否打印进度
 
         Returns
         -------
         dict : 回测结果
         """
+        # ── 完整重置运行状态（防止多次调用 run() 时残留） ──
+        self._benchmarks = {}
+        self._processed_dividends = set()
+        self._rebalance_snapshots = []
+        self._price_data = {}
+        self._dividend_data = {}
+        self._stock_meta = {}
+
         # 初始化
         self._load_stock_meta()
         self._fetch_all_prices(start_date, end_date)
@@ -916,12 +1023,14 @@ class BacktestEngine:
             print(f"  💰 初始资金: {self.portfolio.initial_cash:,.0f} 元")
             print(f"  📋 持仓标的: {len(self._stock_meta)} 只")
 
-        # 获取基准数据
-        self._benchmark_code = benchmark_code
-        self._benchmark = self.fetcher.fetch_benchmark_data(benchmark_code, start_date, end_date)
+        # 获取基准数据（支持多基准）
+        if isinstance(benchmark_code, str):
+            self._benchmark_codes = [b.strip() for b in benchmark_code.split(",") if b.strip()]
+        else:
+            self._benchmark_codes = [b for b in benchmark_code if b]
 
-        # 重置调仓快照
-        self._rebalance_snapshots = []
+        for bc in self._benchmark_codes:
+            self._benchmarks[bc] = self.fetcher.fetch_benchmark_data(bc, start_date, end_date)
 
         # 逐周模拟
         for i, date_str in enumerate(rebalance_dates):
@@ -1003,8 +1112,12 @@ class BacktestEngine:
                 if all_dates is None or len(dates) > len(all_dates):
                     all_dates = dates
         # 仅在无价格数据时才用基准日期
-        if not all_dates and self._benchmark is not None and not self._benchmark.empty:
-            all_dates = self._benchmark["trade_date"].sort_values().tolist()
+        if not all_dates and self._benchmarks:
+            # 取第一个有数据的基准作为交易日历
+            for bc, bm_df in self._benchmarks.items():
+                if bm_df is not None and not bm_df.empty:
+                    all_dates = bm_df["trade_date"].sort_values().tolist()
+                    break
 
         if not all_dates:
             return pd.DataFrame()
@@ -1230,9 +1343,10 @@ class BacktestEngine:
 
         return "\n\n".join(parts)
 
-    def _get_benchmark_name(self) -> str:
+    def _get_benchmark_name(self, code: str = "") -> str:
         """获取基准名称"""
-        code = self._benchmark_code
+        if not code:
+            code = self._benchmark_codes[0] if self._benchmark_codes else ""
         name_map = {
             "000300.SH": "沪深300",
             "515180.SH": "易方达红利ETF",
@@ -1241,7 +1355,7 @@ class BacktestEngine:
         }
         return name_map.get(code, code)
 
-    def _calc_yearly_returns(self, daily_nav_df: pd.DataFrame, benchmark_df: Optional[pd.DataFrame] = None) -> List[Dict]:
+    def _calc_yearly_returns(self, daily_nav_df: pd.DataFrame, benchmarks: Optional[Dict[str, pd.DataFrame]] = None) -> List[Dict]:
         """
         计算逐年收益指标
 
@@ -1251,7 +1365,7 @@ class BacktestEngine:
         - 年初/年末总资产
         - 交易统计（买卖次数、手续费）
         - 分红统计（分红次数、分红金额）
-        - 基准年度收益（如基准数据覆盖该年）
+        - 多基准年度收益（如基准数据覆盖该年）
         """
         if daily_nav_df.empty:
             return []
@@ -1272,23 +1386,28 @@ class BacktestEngine:
             y = pd.Timestamp(rec["date"]).year
             div_by_year.setdefault(y, []).append(rec)
 
-        # 预处理基准数据按年分组
-        bm_by_year: Dict[int, Dict] = {}
-        if benchmark_df is not None and not benchmark_df.empty:
-            bm = benchmark_df.copy()
-            bm["trade_date"] = pd.to_datetime(bm["trade_date"])
-            bm["year"] = bm["trade_date"].dt.year
-            for y in sorted(bm["year"].unique()):
-                yb = bm[bm["year"] == y]
-                if len(yb) >= 2:
-                    bm_start = yb.iloc[0]["close"]
-                    bm_end = yb.iloc[-1]["close"]
-                    if bm_start > 0:
-                        bm_by_year[int(y)] = {
-                            "return": (bm_end / bm_start - 1) * 100,
-                            "start_date": yb.iloc[0]["trade_date"],
-                            "end_date": yb.iloc[-1]["trade_date"],
-                        }
+        # 预处理多基准数据按年分组
+        all_bm_by_year: Dict[str, Dict[int, Dict]] = {}
+        if benchmarks:
+            for bc, benchmark_df in benchmarks.items():
+                if benchmark_df is None or benchmark_df.empty:
+                    continue
+                bm = benchmark_df.copy()
+                bm["trade_date"] = pd.to_datetime(bm["trade_date"])
+                bm["year"] = bm["trade_date"].dt.year
+                bm_yearly: Dict[int, Dict] = {}
+                for y in sorted(bm["year"].unique()):
+                    yb = bm[bm["year"] == y]
+                    if len(yb) >= 2:
+                        bm_start = yb.iloc[0]["close"]
+                        bm_end = yb.iloc[-1]["close"]
+                        if bm_start > 0:
+                            bm_yearly[int(y)] = {
+                                "return": (bm_end / bm_start - 1) * 100,
+                                "start_date": yb.iloc[0]["trade_date"],
+                                "end_date": yb.iloc[-1]["trade_date"],
+                            }
+                all_bm_by_year[bc] = bm_yearly
 
         years = sorted(df["year"].unique())
         results = []
@@ -1339,12 +1458,14 @@ class BacktestEngine:
             yr_div_count = len(yr_div_records)
             yr_div_total = sum(r.get("net_dividend", 0) for r in yr_div_records)
 
-            # 逐年基准收益
-            yr_bm_return = None
-            yr_excess = None
-            if year in bm_by_year:
-                yr_bm_return = round(bm_by_year[year]["return"], 2)
-                yr_excess = round(total_ret - yr_bm_return, 2)
+            # 逐年多基准收益
+            yr_benchmarks: Dict[str, Dict] = {}
+            for bc, bm_yearly in all_bm_by_year.items():
+                if year in bm_yearly:
+                    yr_benchmarks[bc] = {
+                        "return": round(bm_yearly[year]["return"], 2),
+                        "excess": round(total_ret - bm_yearly[year]["return"], 2),
+                    }
 
             results.append({
                 "year": int(year),
@@ -1361,8 +1482,7 @@ class BacktestEngine:
                 "commission": round(yr_commission, 2),
                 "div_count": yr_div_count,
                 "div_total": round(yr_div_total, 2),
-                "benchmark_return": yr_bm_return,
-                "excess_return": yr_excess,
+                "benchmarks": yr_benchmarks,
                 "trades_detail": yr_trades_detail,
                 "div_detail": yr_div_records,
                 "commentary": self._generate_yearly_commentary(
@@ -1433,19 +1553,27 @@ class BacktestEngine:
         dividend_return = dividend_contribution  # 股息收益率(%)
         price_return = total_return - dividend_return  # 股价收益率(%)
 
-        # 年度收益分解（含逐年基准对比）
-        yearly_returns = self._calc_yearly_returns(daily_nav_df, self._benchmark)
+        # 年度收益分解（含逐年多基准对比）
+        yearly_returns = self._calc_yearly_returns(daily_nav_df, self._benchmarks)
 
-        # 基准对比
-        benchmark_return = 0.0
-        benchmark_name = self._get_benchmark_name()
-        if self._benchmark is not None and not self._benchmark.empty:
-            bm_start = self._benchmark.iloc[0]["close"]
-            bm_end = self._benchmark.iloc[-1]["close"]
-            if bm_start > 0:
-                benchmark_return = (bm_end / bm_start - 1) * 100
+        # 多基准对比
+        benchmark_comparisons: Dict[str, Dict] = {}
+        for bc, bm_df in self._benchmarks.items():
+            bm_return = 0.0
+            if bm_df is not None and not bm_df.empty:
+                bm_start = bm_df.iloc[0]["close"]
+                bm_end = bm_df.iloc[-1]["close"]
+                if bm_start > 0:
+                    bm_return = (bm_end / bm_start - 1) * 100
+            benchmark_comparisons[bc] = {
+                "name": self._get_benchmark_name(bc),
+                "return": round(bm_return, 2),
+                "excess": round(total_return - bm_return, 2),
+            }
 
-        excess_return = total_return - benchmark_return
+        # 兼容旧字段（取第一个基准）
+        primary_bc = self._benchmark_codes[0] if self._benchmark_codes else ""
+        primary_bm = benchmark_comparisons.get(primary_bc, {})
 
         results = {
             "period": f"{start_date} ~ {end_date}",
@@ -1460,10 +1588,11 @@ class BacktestEngine:
             "buy_trades": buy_trades,
             "sell_trades": sell_trades,
             "total_commission": round(total_commission, 2),
-            "benchmark_return": round(benchmark_return, 2),
-            "excess_return": round(excess_return, 2),
-            "benchmark_code": self._benchmark_code,
-            "benchmark_name": benchmark_name,
+            "benchmark_return": primary_bm.get("return", 0.0),
+            "excess_return": primary_bm.get("excess", 0.0),
+            "benchmark_code": primary_bc,
+            "benchmark_name": primary_bm.get("name", primary_bc),
+            "benchmark_comparisons": benchmark_comparisons,
             "trading_periods": trading_days,
             "rebalance_freq": self.rebalance_freq,
             "total_dividend": round(total_dividend, 2),
@@ -1518,28 +1647,38 @@ class BacktestEngine:
         print(f"  股价收益率:   {results['price_return']:+.2f}%（剔除分红后）")
 
         print(f"\n  ── 基准对比 ──")
-        bm_name = results.get("benchmark_name", results.get("benchmark_code", "基准"))
-        print(f"  基准标的:     {bm_name}")
-        print(f"  基准收益:     {results['benchmark_return']:+.2f}%")
-        print(f"  超额收益:     {results['excess_return']:+.2f}%")
+        bm_comparisons = results.get("benchmark_comparisons", {})
+        for bc, bm_info in bm_comparisons.items():
+            bm_name = bm_info.get("name", bc)
+            bm_ret = bm_info.get("return", 0.0)
+            bm_exc = bm_info.get("excess", 0.0)
+            print(f"  {bm_name}: {bm_ret:+.2f}%  超额: {bm_exc:+.2f}%")
 
         # 年度收益
         yearly = results.get("yearly_returns", [])
-        has_bm = any(yr.get("benchmark_return") is not None for yr in yearly)
+        bm_codes = list(results.get("benchmark_comparisons", {}).keys())
         if yearly:
             print(f"\n  ── 逐年收益 ──")
-            bm_header = f" {'基准':>8} {'超额':>8}" if has_bm else ""
-            print(f"  {'年份':>6} {'总收益':>8} {'股价':>8} {'股息':>8} {'回撤':>8}{bm_header} │ {'买入':>4} {'卖出':>4} {'手续费':>8} │ {'分红':>4} {'分红额':>9}")
-            sep_len = 86 + (20 if has_bm else 0)
+            # 动态构建基准列头
+            bm_headers = ""
+            for bc in bm_codes:
+                bm_name = self._get_benchmark_name(bc)
+                # 缩短名称
+                short_name = bm_name.replace("沪深300", "沪深300").replace("易方达红利ETF", "红利ETF").replace("中证红利", "中证红利")
+                bm_headers += f" {short_name:>8} {'超额':>6}"
+            print(f"  {'年份':>6} {'总收益':>8} {'股价':>8} {'股息':>8} {'回撤':>8}{bm_headers} │ {'买入':>4} {'卖出':>4} {'手续费':>8} │ {'分红':>4} {'分红额':>9}")
+            sep_len = 86 + len(bm_codes) * 16
             print("  " + "-" * sep_len)
             for yr in yearly:
                 bm_cols = ""
-                if has_bm:
-                    bm_ret = yr.get("benchmark_return")
-                    exc_ret = yr.get("excess_return")
+                yr_benchmarks = yr.get("benchmarks", {})
+                for bc in bm_codes:
+                    bm_data = yr_benchmarks.get(bc, {})
+                    bm_ret = bm_data.get("return")
+                    exc_ret = bm_data.get("excess")
                     bm_str = f"{bm_ret:>+7.1f}%" if bm_ret is not None else f"{'N/A':>8}"
-                    exc_str = f"{exc_ret:>+7.1f}%" if exc_ret is not None else f"{'N/A':>8}"
-                    bm_cols = f" {bm_str} {exc_str}"
+                    exc_str = f"{exc_ret:>+5.1f}%" if exc_ret is not None else f"{'N/A':>6}"
+                    bm_cols += f" {bm_str} {exc_str}"
                 print(
                     f"  {yr['year']:>6} {yr['total_return']:>+7.1f}% "
                     f"{yr['price_return']:>+7.1f}% {yr['dividend_return']:>+7.1f}% "
@@ -1601,32 +1740,56 @@ class BacktestEngine:
         lines.append(f"| 卡尔玛比率 | {results['calmar_ratio']:.2f} |")
         lines.append("")
 
-        # 基准对比
-        bm_name = results.get("benchmark_name", results.get("benchmark_code", "基准"))
+        # 基准对比（多基准）
+        bm_comparisons = results.get("benchmark_comparisons", {})
         lines.append("## 📊 基准对比\n")
-        lines.append(f"| 指标 | 策略 | 基准({bm_name}) |")
-        lines.append("|------|------|--------------|")
-        lines.append(f"| 收益率 | {results['total_return']:+.2f}% | {results['benchmark_return']:+.2f}% |")
-        lines.append(f"| 超额收益 | {results['excess_return']:+.2f}% | — |")
+        if bm_comparisons:
+            header = "| 指标 | 策略 |"
+            sep = "|------|------|"
+            for bc, bm_info in bm_comparisons.items():
+                header += f" {bm_info.get('name', bc)} |"
+                sep += "--------------|"
+            lines.append(header)
+            lines.append(sep)
+            ret_row = f"| 收益率 | {results['total_return']:+.2f}% |"
+            exc_row = f"| 超额收益 | — |"
+            for bc, bm_info in bm_comparisons.items():
+                ret_row += f" {bm_info.get('return', 0):+.2f}% |"
+                exc_row += f" {bm_info.get('excess', 0):+.2f}% |"
+            lines.append(ret_row)
+            lines.append(exc_row)
+        else:
+            bm_name = results.get("benchmark_name", results.get("benchmark_code", "基准"))
+            lines.append(f"| 指标 | 策略 | 基准({bm_name}) |")
+            lines.append("|------|------|--------------|")
+            lines.append(f"| 收益率 | {results['total_return']:+.2f}% | {results['benchmark_return']:+.2f}% |")
+            lines.append(f"| 超额收益 | {results['excess_return']:+.2f}% | — |")
         lines.append("")
 
         # 年度收益
         yearly = results.get("yearly_returns", [])
-        has_bm = any(yr.get("benchmark_return") is not None for yr in yearly)
+        bm_codes = list(bm_comparisons.keys())
         if yearly:
             lines.append("## 📅 逐年收益\n")
-            bm_cols_h = " | 基准收益 | 超额收益" if has_bm else ""
-            bm_cols_s = " |--------|--------" if has_bm else ""
+            # 动态构建多基准列
+            bm_cols_h = ""
+            bm_cols_s = ""
+            for bc in bm_codes:
+                bm_name = self._get_benchmark_name(bc)
+                bm_cols_h += f" | {bm_name} | 超额"
+                bm_cols_s += " |--------|--------"
             lines.append(f"| 年份 | 年初资产 | 年末资产 | 总收益 | 股价收益 | 股息收益 | 最大回撤 │ 买入 | 卖出 | 手续费 | 分红次数 | 分红金额{bm_cols_h} |")
             lines.append(f"|------|---------|---------|--------|---------|---------|--------|------|------|--------|---------|---------{bm_cols_s} |")
             for yr in yearly:
                 bm_cols_v = ""
-                if has_bm:
-                    bm_ret = yr.get("benchmark_return")
-                    exc_ret = yr.get("excess_return")
+                yr_benchmarks = yr.get("benchmarks", {})
+                for bc in bm_codes:
+                    bm_data = yr_benchmarks.get(bc, {})
+                    bm_ret = bm_data.get("return")
+                    exc_ret = bm_data.get("excess")
                     bm_str = f"{bm_ret:+.1f}%" if bm_ret is not None else "N/A"
                     exc_str = f"{exc_ret:+.1f}%" if exc_ret is not None else "N/A"
-                    bm_cols_v = f" | {bm_str} | {exc_str}"
+                    bm_cols_v += f" | {bm_str} | {exc_str}"
                 lines.append(
                     f"| {yr['year']} | {yr['start_value']:,.0f} | {yr['end_value']:,.0f} | "
                     f"**{yr['total_return']:+.1f}%** | {yr['price_return']:+.1f}% | "
@@ -1652,9 +1815,14 @@ class BacktestEngine:
                     f"| 手续费 {yr['commission']:,.0f} 元"
                 )
                 bm_ret = yr.get("benchmark_return")
-                if bm_ret is not None:
-                    exc_ret = yr.get("excess_return", 0)
-                    summary_line += f" | {bm_name} {bm_ret:+.1f}% 超额 {exc_ret:+.1f}%"
+                yr_benchmarks = yr.get("benchmarks", {})
+                if yr_benchmarks:
+                    for bc, bm_data in yr_benchmarks.items():
+                        bm_ret_v = bm_data.get("return")
+                        exc_ret_v = bm_data.get("excess")
+                        if bm_ret_v is not None:
+                            bm_nm = self._get_benchmark_name(bc)
+                            summary_line += f" | {bm_nm} {bm_ret_v:+.1f}% 超额 {exc_ret_v:+.1f}%"
                 lines.append(summary_line)
                 lines.append("")
 

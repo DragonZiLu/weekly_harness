@@ -5,7 +5,10 @@ __pycache__/
 .pytest_cache/
 data/weekly_reports/
 data/weekly_history.csv
+data/weekly_history.csv.tmp
 data/dividend_report.md
 data/dividend_chart.png
+data/backtest/
 logs/
 *.egg-info/
+*.tmp
