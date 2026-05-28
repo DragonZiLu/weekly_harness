@@ -155,6 +155,65 @@ THRESHOLDS = {
     "bond_yield_10y": 1.65,  # 2026年5月约1.65%
 }
 
+# ── 细分行业股息率锚 ──────────────────────────────────────────
+# 参考「分红养老之路」作者逻辑：不同行业的历史股息率锚点不同
+# 每个行业定义四档：观察（开始关注）、买入（建仓）、加仓（加大）、满仓（极佳买点）
+# 以及网格交易的减仓线（股息率低于此值减仓）
+SECTOR_THRESHOLDS = {
+    "水电": {
+        "watch": 3.5, "buy": 4.0, "add": 4.5, "full": 5.0, "reduce": 3.0,
+        "comment": "弱周期标杆，4%+即可攒股，5%+黄金坑",
+    },
+    "运营商": {
+        "watch": 4.0, "buy": 4.5, "add": 5.0, "full": 5.5, "reduce": 3.5,
+        "comment": "央企垄断，4.5%+布局，5%+加仓",
+    },
+    "银行": {
+        "watch": 4.0, "buy": 5.0, "add": 6.0, "full": 7.0, "reduce": 3.5,
+        "comment": "四大行7%+历史极值，5%+可建仓",
+    },
+    "保险": {
+        "watch": 3.5, "buy": 4.5, "add": 5.0, "full": 5.5, "reduce": 3.5,
+        "comment": "综合金融，4.5%+布局",
+    },
+    "家电": {
+        "watch": 4.0, "buy": 5.0, "add": 6.0, "full": 7.0, "reduce": 3.5,
+        "comment": "消费龙头6%股息率很香，7%+极佳",
+    },
+    "白酒": {
+        "watch": 3.5, "buy": 5.0, "add": 6.0, "full": 7.0, "reduce": 3.0,
+        "comment": "高端白酒5%+可布局，6%+积极",
+    },
+    "中药": {
+        "watch": 3.5, "buy": 5.0, "add": 5.5, "full": 6.0, "reduce": 3.5,
+        "comment": "百年品牌5%+可布局，6%+极佳",
+    },
+    "矿业": {
+        "watch": 2.0, "buy": 3.0, "add": 4.0, "full": 5.0, "reduce": 1.5,
+        "comment": "成长型矿业，低股息但高增速",
+    },
+    "石油": {
+        "watch": 4.0, "buy": 5.0, "add": 6.0, "full": 7.0, "reduce": 3.5,
+        "comment": "周期资源5%+建仓，7%+极佳",
+    },
+    "煤炭": {
+        "watch": 5.0, "buy": 7.0, "add": 8.0, "full": 10.0, "reduce": 4.5,
+        "comment": "煤炭10%+历史极值，7%+可建仓",
+    },
+    "ETF": {
+        "watch": 3.5, "buy": 4.0, "add": 4.5, "full": 5.0, "reduce": 3.0,
+        "comment": "ETF分散投资，4%+即可攒股",
+    },
+}
+
+# ── 行业对冲组合 ──────────────────────────────────────────────
+# 天然对冲：配煤炭则配火电，煤价跌利好火电、煤价涨利好煤炭
+HEDGE_PAIRS = {
+    "煤炭": "火电",   # 煤炭↔火电天然对冲
+    "银行": "保险",   # 金融板块内均衡
+    "石油": "化工",   # 上下游对冲
+}
+
 # 网络补充数据（tushare 缺失时使用，2026-05-22 数据）
 FALLBACK_DATA = {
     "600900.SH": {  # 长江电力
@@ -1125,6 +1184,7 @@ class DividendCycleEvaluator:
         category = meta["category"]
         certainty = meta["certainty"]
         moat = meta["moat"]
+        sector = meta.get("sector", "")
 
         # 获取数据
         data = self._get_company_data(name, ts_code, category=category)
@@ -1142,10 +1202,22 @@ class DividendCycleEvaluator:
         # 分红复投10年预测
         drip_10y = self._drip_projection(data["div_yield"], 10)
 
+        # ── 新增：阶梯攒股价格表 ──
+        ladder = self._calc_ladder_prices(data["div_yield"], data["close"], sector)
+
+        # ── 新增：预期股息率 ──
+        forward_div = self._calc_forward_div_yield(
+            data["div_yield"], data["close"], data["net_profit_growth"], data.get("dps_latest", 0)
+        )
+
+        # ── 新增：网格交易区间 ──
+        grid = self._calc_grid_range(data["div_yield"], sector)
+
         return {
             "name": name,
             "ts_code": ts_code,
             "category": category,
+            "sector": sector,
             "certainty": certainty,
             "moat": moat,
             "comment": meta.get("comment", ""),
@@ -1173,11 +1245,116 @@ class DividendCycleEvaluator:
             "verdict": verdict,
             "advice": advice,
             "drip_10y": drip_10y,
+            # ── 新增字段 ──
+            "ladder": ladder,
+            "forward_div_yield": forward_div["forward_div_yield"],
+            "forward_dps": forward_div["forward_dps"],
+            "grid": grid,
             # ── 自验证透传字段（供 Validator 交叉核对，不用于评分）──
             "_div_self_calc":  data.get("_div_self_calc"),
             "_div_dv_ttm":     data.get("_div_dv_ttm"),
             "_div_fallback":   data.get("_div_fallback"),
             "_close_fallback": data.get("_close_fallback"),
+        }
+
+    def _calc_ladder_prices(self, div_yield: float, close: float, sector: str) -> Dict:
+        """
+        阶梯攒股价格表
+        
+        基于行业股息率锚，反推不同档位的目标价格：
+          观察价 → 开始关注
+          买入价 → 建仓底仓
+          加仓价 → 加大仓位
+          满仓价 → 极佳买点，全力攒股
+        
+        公式：目标价 = DPS / (目标股息率阈值/100)
+        其中 DPS = 当前股价 × 当前股息率/100
+        """
+        thresholds = SECTOR_THRESHOLDS.get(sector, {})
+        if not thresholds or close <= 0 or div_yield <= 0:
+            return {"watch": 0, "buy": 0, "add": 0, "full": 0, "sector_anchor": ""}
+
+        dps = close * div_yield / 100  # 每股分红
+
+        watch_price = round(dps / (thresholds["watch"] / 100), 2) if thresholds["watch"] > 0 else 0
+        buy_price   = round(dps / (thresholds["buy"] / 100), 2) if thresholds["buy"] > 0 else 0
+        add_price   = round(dps / (thresholds["add"] / 100), 2) if thresholds["add"] > 0 else 0
+        full_price  = round(dps / (thresholds["full"] / 100), 2) if thresholds["full"] > 0 else 0
+
+        return {
+            "watch": watch_price,
+            "buy": buy_price,
+            "add": add_price,
+            "full": full_price,
+            "sector_anchor": thresholds.get("comment", ""),
+        }
+
+    def _calc_forward_div_yield(
+        self, div_yield: float, close: float, 
+        net_profit_growth: float, dps_latest: float
+    ) -> Dict:
+        """
+        预期股息率（前瞻性指标）
+        
+        基于净利润增速推算下一年 DPS，再除以当前股价：
+          forward_dps = latest_dps × (1 + growth/100)
+          forward_div_yield = forward_dps / close × 100
+        
+        当增速为负时，保守取 min(dps_latest, dps_latest*(1+growth/100))
+        """
+        if close <= 0:
+            return {"forward_div_yield": 0.0, "forward_dps": 0.0}
+
+        # 用 dps_latest 作为基准（若有），否则从股息率反推
+        if dps_latest and dps_latest > 0:
+            base_dps = dps_latest
+        else:
+            base_dps = close * div_yield / 100
+
+        # 增速为正：用增速推算；为负：保守取值
+        if net_profit_growth > 0:
+            forward_dps = base_dps * (1 + net_profit_growth / 100)
+        else:
+            forward_dps = min(base_dps, base_dps * (1 + net_profit_growth / 100))
+
+        forward_div_yield = round(forward_dps / close * 100, 2) if forward_dps > 0 else 0.0
+
+        return {
+            "forward_div_yield": forward_div_yield,
+            "forward_dps": round(forward_dps, 4),
+        }
+
+    def _calc_grid_range(self, div_yield: float, sector: str) -> Dict:
+        """
+        网格交易区间（基于股息率）
+        
+        将当前股息率与行业锚对比，给出操作区间：
+          低吸区 → 股息率 ≥ 买入阈值，适合加仓
+          持有区 → 股息率在减仓线和买入阈值之间，持股收息
+          减仓区 → 股息率 < 减仓线，估值偏高可减仓
+        """
+        thresholds = SECTOR_THRESHOLDS.get(sector, {})
+        if not thresholds:
+            return {"zone": "未知", "buy_line": 0, "reduce_line": 0, "desc": "无行业锚数据"}
+
+        buy_line = thresholds["buy"]
+        reduce_line = thresholds["reduce"]
+
+        if div_yield >= buy_line:
+            zone = "低吸"
+            desc = f"股息率{div_yield:.1f}% ≥ 买入线{buy_line:.1f}%，适合加仓"
+        elif div_yield >= reduce_line:
+            zone = "持有"
+            desc = f"股息率{reduce_line:.1f}%~{buy_line:.1f}%，持股收息"
+        else:
+            zone = "减仓"
+            desc = f"股息率{div_yield:.1f}% < 减仓线{reduce_line:.1f}%，估值偏高"
+
+        return {
+            "zone": zone,
+            "buy_line": buy_line,
+            "reduce_line": reduce_line,
+            "desc": desc,
         }
 
     def _drip_projection(self, initial_yield: float, years: int) -> Dict:
@@ -1219,6 +1396,7 @@ class DividendCycleEvaluator:
         for sector, companies in COMPANIES.items():
             print(f"━━ 【{sector}】 ━━")
             for name, meta in companies.items():
+                meta["sector"] = sector  # 注入行业细分
                 result = self.evaluate_company(name, meta["ts_code"], meta)
                 self.results.append(result)
                 print(f"    → 总分: {result['total_score']:.0f}/100 | {result['verdict']}")
@@ -1257,9 +1435,9 @@ class DividendCycleEvaluator:
         for r in self.results:
             scores[r["ts_code"]] = {
                 "name": r["name"],
-                "sector": next(
+                "sector": r.get("sector", next(
                     (s for s, cos in COMPANIES.items() if r["name"] in cos), "未知"
-                ),
+                )),
                 "category": r["category"],
                 "certainty": r["certainty"],
                 "total_score": r["total_score"],
@@ -1287,6 +1465,11 @@ class DividendCycleEvaluator:
                 "advice": r["advice"],
                 "drip_10y": r["drip_10y"],
                 "note": r["note"],
+                # ── 新增：阶梯攒股 / 预期股息率 / 网格交易 ──
+                "ladder": r.get("ladder", {}),
+                "forward_div_yield": r.get("forward_div_yield", 0.0),
+                "forward_dps": r.get("forward_dps", 0.0),
+                "grid": r.get("grid", {}),
                 # ── 自验证字段（透传给 Validator）──
                 "_div_self_calc":  r.get("_div_self_calc"),
                 "_div_dv_ttm":     r.get("_div_dv_ttm"),

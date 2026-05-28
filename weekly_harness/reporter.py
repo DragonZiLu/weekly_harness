@@ -37,6 +37,7 @@ _PROJECT_ROOT = _HARNESS_DIR.parent
 sys.path.insert(0, str(_PROJECT_ROOT))
 
 from config.settings import tushare_cfg
+from dividend_evaluator import HEDGE_PAIRS  # noqa: E402
 
 # 中文字体
 def _setup_font():
@@ -662,12 +663,56 @@ class WeeklyReporter:
                     lines.append(f"| 股价 | {s['close']:.2f}元 | 来源: {s.get('source', '?')} |")
                     lines.append(f"| PE | {s['pe_ttm']:.1f}x | |")
                     lines.append(f"| 股息率 | **{s['div_yield']:.2f}%** | S1={s['s1_div']}/30: {s.get('r1','')} |")
+                    if s.get('forward_div_yield', 0) > 0:
+                        lines.append(f"| 预期股息率 | **{s['forward_div_yield']:.2f}%** | 下年预测DPS {s.get('forward_dps',0):.2f}元 |")
                     lines.append(f"| 股债息差 | **{s['bond_spread_bp']:.0f}BP** | S2={s['s2_spread']}/25: {s.get('r2','')} |")
                     lines.append(f"| 等效分红 | **{s['eff_yield']:.2f}%** | S3={s['s3_eff']}/20: {s.get('r3','')} |")
                     lines.append(f"| 确定性 | {s.get('certainty','')} | S4={s['s4_certainty']}/15: {s.get('r4','')} |")
                     lines.append(f"| ROE | {s['roe']:.1f}% | S5={s['s5_growth']}/10: {s.get('r5','')} |")
                     lines.append(f"| **总分** | **{s['total_score']:.0f}/100** | 置信度: {conf} |")
                 lines.append("")
+
+                # ── 阶梯攒股价格表 ──
+                ladder = s.get("ladder", {})
+                if ladder and ladder.get("buy", 0) > 0:
+                    lines.append("**阶梯攒股价格表**\n")
+                    lines.append("| 档位 | 目标价 | 股息率阈值 | 说明 |")
+                    lines.append("|------|--------|-----------|------|")
+                    close = s["close"]
+                    # 标注当前价格所处档位
+                    def _mark(price, close):
+                        return " ← 当前" if close <= price * 1.01 and close >= price * 0.99 else ""
+                    lines.append(f"| 👀 观察 | {ladder['watch']:.2f}元 | — | 股息率到达观察线 |")
+                    lines.append(f"| ✅ 买入 | {ladder['buy']:.2f}元 | — | 建仓底仓{_mark(ladder['buy'], close)} |")
+                    lines.append(f"| 📈 加仓 | {ladder['add']:.2f}元 | — | 加大仓位{_mark(ladder['add'], close)} |")
+                    lines.append(f"| 🔥 满仓 | {ladder['full']:.2f}元 | — | 极佳买点{_mark(ladder['full'], close)} |")
+                    if ladder.get("sector_anchor"):
+                        lines.append(f"\n> {ladder['sector_anchor']}")
+                    lines.append("")
+
+                # ── 网格交易区间 ──
+                grid = s.get("grid", {})
+                if grid and grid.get("zone", "未知") != "未知":
+                    zone_icon = {"低吸": "🟢", "持有": "🟡", "减仓": "🔴"}.get(grid["zone"], "⚪")
+                    lines.append(f"**网格交易**: {zone_icon} **{grid['zone']}区** — {grid['desc']}\n")
+
+                # ── 行业对冲提示 ──
+                sector = s.get("sector", "")
+                if sector in HEDGE_PAIRS:
+                    hedge_sector = HEDGE_PAIRS[sector]
+                    hedge_names = []
+                    for ts, sc in scores.items():
+                        if sc.get("sector") == hedge_sector:
+                            hedge_names.append(sc["name"])
+                    if hedge_names:
+                        # 根据对冲组合给出不同的描述
+                        hedge_descs = {
+                            "煤炭": "煤价跌利好火电、煤价涨利好煤炭",
+                            "银行": "金融板块内均衡配置",
+                            "石油": "上下游对冲",
+                        }
+                        desc = hedge_descs.get(sector, "天然对冲，分散风险")
+                        lines.append(f"> 🔄 **行业对冲**: {sector} ↔ {hedge_sector}（{', '.join(hedge_names)}），{desc}\n")
 
                 # ── 历史股息率横向对比 ──
                 if cat == "ETF红利":
