@@ -38,6 +38,7 @@ import pandas as pd
 
 from .portfolio import Portfolio
 from .strategy import DividendCycleStrategy, StrategyParams, RebalanceAction
+from dividend_evaluator import SECTOR_THRESHOLDS, HEDGE_PAIRS
 
 # ─── 路径 ──────────────────────────────────────────────────────
 _PROJECT_ROOT = Path(__file__).parent.parent
@@ -420,6 +421,7 @@ class BacktestEngine:
                     "name": name,
                     "category": meta["category"],
                     "certainty": meta.get("certainty", ""),
+                    "sector": sector,  # 行业细分（水电/银行/家电等）
                     "is_etf": meta["category"] == "ETF红利",
                 }
 
@@ -685,10 +687,12 @@ class BacktestEngine:
         """
         基于历史数据的简化评分模拟（无前视偏差版本）
 
-        核心改进：
-        - 股息率：使用当时已公告的历史分红 + 历史价格计算，不使用当前 FALLBACK_DATA
+        核心改进（v2）：
+        - 股息率：使用当时已公告的历史分红 + 历史价格计算
+        - 行业股息率锚：不同行业使用不同的评分阈值
+        - 预期股息率：基于净利润增速推算 forward_div_yield
+        - 网格交易区间：低吸/持有/减仓
         - 国债收益率：使用历史年度数据线性插值
-        - PE/ROE：无历史数据，标记为 "历史模拟" 以区别于实时评分
         """
         scores = {}
         bond_yield = self._get_bond_yield_at_date(date_str)
@@ -696,6 +700,7 @@ class BacktestEngine:
         for ts_code, meta in self._stock_meta.items():
             price = self._get_price_on_date(ts_code, date_str)
             category = meta["category"]
+            sector = meta.get("sector", "")
 
             if not price or price <= 0:
                 continue
@@ -705,21 +710,52 @@ class BacktestEngine:
             if trailing_dps > 0 and price > 0:
                 sim_div_yield = trailing_dps / price * 100
             else:
-                # 无历史分红数据（如新股/新ETF），跳过
+                # 无历史分红数据，跳过
                 continue
 
             # 息差
             spread_bp = (sim_div_yield - bond_yield * 100)
 
-            # 简化评分公式（近似 DividendCycleEvaluator 的逻辑）
-            s1 = min(30, max(0, sim_div_yield * 5))   # 股息率评分
-            s2 = min(25, max(0, spread_bp / 10))       # 息差评分
-            s3 = min(20, max(0, sim_div_yield * 3))    # 等效分红
+            # ── 行业股息率锚评分（替代统一阈值）──
+            sector_thresholds = SECTOR_THRESHOLDS.get(sector, {})
+
+            # S1 股息率评分：基于行业锚动态调整
+            if sector_thresholds:
+                buy_line = sector_thresholds.get("buy", 5.0)
+                full_line = sector_thresholds.get("full", 7.0)
+                if sim_div_yield >= full_line:
+                    s1 = 30  # 满分
+                elif sim_div_yield >= buy_line:
+                    # 在买入线和满仓线之间线性给分
+                    s1 = 20 + (sim_div_yield - buy_line) / (full_line - buy_line) * 10
+                elif sim_div_yield >= buy_line * 0.7:
+                    s1 = sim_div_yield / buy_line * 20
+                else:
+                    s1 = max(0, sim_div_yield / buy_line * 15)
+            else:
+                s1 = min(30, max(0, sim_div_yield * 5))
+
+            # S2 息差评分
+            s2 = min(25, max(0, spread_bp / 10))
+
+            # S3 等效分红评分（不含回购数据，保守估计）
+            if sector_thresholds:
+                full_line = sector_thresholds.get("full", 7.0)
+                if sim_div_yield >= full_line:
+                    s3 = 20
+                else:
+                    s3 = min(20, max(0, sim_div_yield / full_line * 20))
+            else:
+                s3 = min(20, max(0, sim_div_yield * 3))
+
+            # S4 确定性评分
             certainty_score = {"AA": 15, "A": 13, "A-": 11, "B+": 8, "B": 5}.get(
                 meta.get("certainty", "B+"), 8
             )
             s4 = certainty_score
-            s5 = 5  # 成长性给默认值
+
+            # S5 成长性给默认值
+            s5 = 5
 
             total = s1 + s2 + s3 + s4 + s5
 
@@ -735,17 +771,53 @@ class BacktestEngine:
             else:
                 verdict = "🚫 回避"
 
+            # ── 预期股息率（基于行业增速推算）──
+            # 简化：用行业平均增速估算 forward_dps
+            sector_growth = {
+                "水电": 3.0, "运营商": 5.0, "银行": 4.0, "保险": 6.0,
+                "家电": 8.0, "白酒": 12.0, "中药": 8.0, "矿业": 15.0,
+                "石油": 5.0, "煤炭": -2.0, "ETF": 5.0,
+            }
+            growth = sector_growth.get(sector, 5.0)
+            forward_dps = trailing_dps * (1 + growth / 100)
+            forward_div_yield = forward_dps / price * 100 if price > 0 else 0
+
+            # ── 网格交易区间 ──
+            grid = {}
+            if sector_thresholds:
+                buy_line = sector_thresholds.get("buy", 5.0)
+                reduce_line = sector_thresholds.get("reduce", 3.0)
+                if sim_div_yield >= buy_line:
+                    grid_zone = "低吸"
+                elif sim_div_yield >= reduce_line:
+                    grid_zone = "持有"
+                else:
+                    grid_zone = "减仓"
+                grid = {"zone": grid_zone, "buy_line": buy_line, "reduce_line": reduce_line}
+
+            # ── 阶梯攒股价格 ──
+            ladder = {}
+            if sector_thresholds and trailing_dps > 0:
+                for level in ["watch", "buy", "add", "full"]:
+                    threshold = sector_thresholds.get(level, 0)
+                    if threshold > 0:
+                        ladder[level] = round(trailing_dps / (threshold / 100), 2)
+
             scores[ts_code] = {
                 "name": meta["name"],
                 "category": category,
+                "sector": sector,
                 "total_score": round(total, 1),
                 "verdict": verdict,
                 "div_yield": round(sim_div_yield, 2),
+                "forward_div_yield": round(forward_div_yield, 2),
                 "close": price,
-                "pe_ttm": 0,  # 无历史PE数据
-                "roe": 0,     # 无历史ROE数据
+                "pe_ttm": 0,
+                "roe": 0,
                 "bond_spread_bp": round(spread_bp, 0),
-                "score_source": "历史模拟",  # 标记评分来源
+                "grid": grid,
+                "ladder": ladder,
+                "score_source": "历史模拟",
             }
 
         return scores

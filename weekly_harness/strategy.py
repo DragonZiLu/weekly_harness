@@ -107,17 +107,32 @@ class DividendCycleStrategy:
     def __init__(self, params: Optional[StrategyParams] = None):
         self.params = params or StrategyParams()
 
-    def score_to_target_weight(self, score: float, category: str = "") -> float:
-        """评分 → 目标仓位权重"""
+    def score_to_target_weight(self, score: float, category: str = "", grid_zone: str = "") -> float:
+        """
+        评分 → 目标仓位权重
+        
+        网格交易区间加成：
+        - 低吸区：权重 × 1.2（加大仓位）
+        - 持有区：权重 × 1.0（正常持有）
+        - 减仓区：权重 × 0.5（减半仓位）
+        """
         p = self.params
         if score >= p.score_strong_buy:
-            return p.max_weight
+            base_weight = p.max_weight
         elif score >= p.score_buy:
-            return p.mid_weight
+            base_weight = p.mid_weight
         elif score >= p.score_watch:
-            return p.min_weight
+            base_weight = p.min_weight
         else:
             return 0.0
+
+        # 网格交易区间加成
+        if grid_zone == "低吸":
+            base_weight *= 1.2
+        elif grid_zone == "减仓":
+            base_weight *= 0.5
+        
+        return min(base_weight, p.max_single_stock)
 
     def _apply_category_constraints(
         self,
@@ -209,7 +224,8 @@ class DividendCycleStrategy:
         raw_targets = {}
         for ts_code, score_data in scores.items():
             s = score_data.get("total_score", 0)
-            raw_targets[ts_code] = self.score_to_target_weight(s, score_data.get("category", ""))
+            grid_zone = score_data.get("grid", {}).get("zone", "")
+            raw_targets[ts_code] = self.score_to_target_weight(s, score_data.get("category", ""), grid_zone)
 
         # Step 2: 类别约束
         adjusted = self._apply_category_constraints(raw_targets, scores)
