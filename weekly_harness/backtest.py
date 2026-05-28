@@ -122,27 +122,80 @@ class BacktestDataFetcher:
         start_date: str,
         end_date: str,
         is_etf: bool = False,
+        use_fund_nav: bool = False,
     ) -> pd.DataFrame:
         """
         获取历史价格数据
+
+        use_fund_nav: 使用 fund_nav 复权净值（适用于货币ETF等，
+                       fund_daily 价格不含分红再投资，须用复权净值反映真实收益）
 
         Returns
         -------
         DataFrame with columns: trade_date, open, high, low, close, vol
         """
-        cache_key = f"{ts_code}_{start_date}_{end_date}_{is_etf}"
+        cache_key = f"{ts_code}_{start_date}_{end_date}_{is_etf}_{use_fund_nav}"
         if cache_key in self._price_cache:
             return self._price_cache[cache_key]
 
         pro = self._get_tushare_pro()
 
-        if is_etf:
+        if use_fund_nav:
+            # 货币ETF使用复权净值（累计净值），反映含分红再投资的真实收益
+            df_nav = pro.fund_nav(ts_code=ts_code)
+            time.sleep(0.15)
+            if df_nav is None or df_nav.empty:
+                return pd.DataFrame()
+
+            df_nav = df_nav.sort_values("nav_date").reset_index(drop=True)
+            df_nav["nav_date"] = pd.to_datetime(df_nav["nav_date"], format="%Y%m%d")
+            start_ts = pd.Timestamp(start_date)
+            end_ts = pd.Timestamp(end_date)
+            df_nav = df_nav[(df_nav["nav_date"] >= start_ts) & (df_nav["nav_date"] <= end_ts)]
+
+            if df_nav.empty:
+                return pd.DataFrame()
+
+            # 用 adj_nav 的增长率缩放 unit_nav，得到以 unit_nav 为基准的复权价格
+            # adj_nav 从 1.0 起步，unit_nav ~100，直接取 adj_nav 会导致价格数量级错误
+            df_nav["unit_nav"] = df_nav["unit_nav"].astype(float)
+            df_nav["adj_nav"] = df_nav["adj_nav"].astype(float)
+
+            base_unit = df_nav["unit_nav"].iloc[0]
+            base_adj = df_nav["adj_nav"].iloc[0]
+
+            if base_adj > 0:
+                df_nav["scaled_close"] = base_unit * df_nav["adj_nav"] / base_adj
+            else:
+                df_nav["scaled_close"] = df_nav["unit_nav"]
+
+            df = pd.DataFrame({
+                "ts_code": df_nav["ts_code"],
+                "trade_date": df_nav["nav_date"],
+                "close": df_nav["scaled_close"],
+            })
+            # 填充缺失列以兼容调用方
+            df["open"] = df["close"]
+            df["high"] = df["close"]
+            df["low"] = df["close"]
+            df["vol"] = 0
+            df = df.dropna(subset=["close"]).reset_index(drop=True)
+
+        elif is_etf:
             df = pro.fund_daily(
                 ts_code=ts_code,
                 start_date=start_date.replace("-", ""),
                 end_date=end_date.replace("-", ""),
                 fields="ts_code,trade_date,open,high,low,close,vol",
             )
+            time.sleep(0.15)
+
+            if df is None or df.empty:
+                return pd.DataFrame()
+
+            df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
+            df = df.sort_values("trade_date").reset_index(drop=True)
+
         else:
             df = pro.daily(
                 ts_code=ts_code,
@@ -150,14 +203,13 @@ class BacktestDataFetcher:
                 end_date=end_date.replace("-", ""),
                 fields="ts_code,trade_date,open,high,low,close,vol",
             )
+            time.sleep(0.15)
 
-        time.sleep(0.15)  # 限流
+            if df is None or df.empty:
+                return pd.DataFrame()
 
-        if df is None or df.empty:
-            return pd.DataFrame()
-
-        df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
-        df = df.sort_values("trade_date").reset_index(drop=True)
+            df["trade_date"] = pd.to_datetime(df["trade_date"], format="%Y%m%d")
+            df = df.sort_values("trade_date").reset_index(drop=True)
 
         self._price_cache[cache_key] = df
         return df
@@ -411,6 +463,10 @@ class BacktestEngine:
         # 调仓后持仓快照（用于构建日线净值）
         self._rebalance_snapshots: List[Dict] = []
 
+    # 现金管理 ETF（闲置资金自动买入）
+    CASH_ETF_CODE = "511880.SH"
+    CASH_ETF_NAME = "银华日利"
+
     def _load_stock_meta(self):
         """加载股票元数据（从 dividend_evaluator）"""
         import sys
@@ -428,16 +484,28 @@ class BacktestEngine:
                     "is_etf": meta["category"] == "ETF红利",
                 }
 
+        # 现金管理 ETF（闲置资金自动买入，不参与评分）
+        self._stock_meta[self.CASH_ETF_CODE] = {
+            "name": self.CASH_ETF_NAME,
+            "category": "现金管理",
+            "certainty": "",
+            "sector": "货币",
+            "is_etf": True,
+        }
+
     def _fetch_all_prices(self, start_date: str, end_date: str):
         """预获取所有标的价格数据"""
         print("\n  📥 预获取历史价格数据...")
         for ts_code, meta in self._stock_meta.items():
             print(f"    {meta['name']} ({ts_code})...", end=" ")
+            # 现金管理ETF使用 fund_nav 复权净值（fund_daily 不包含分红再投资）
+            use_nav = (meta.get("category") == "现金管理")
             df = self.fetcher.fetch_price_data(
                 ts_code=ts_code,
                 start_date=start_date,
                 end_date=end_date,
                 is_etf=meta.get("is_etf", False),
+                use_fund_nav=use_nav,
             )
             if not df.empty:
                 self._price_data[ts_code] = df
@@ -584,9 +652,22 @@ class BacktestEngine:
         if div_df.empty:
             return 0.0
 
-        # 必须有 ex_date 和 end_date 列
-        if "ex_date" not in div_df.columns or "end_date" not in div_df.columns:
+        # 必须有 ex_date 列
+        if "ex_date" not in div_df.columns:
             return 0.0
+
+        # ETF 没有 end_date 列，使用回退逻辑：取最近一次已除权分红作为年度DPS
+        if "end_date" not in div_df.columns:
+            div_df = div_df.copy()
+            div_df["ex_date_ts"] = pd.to_datetime(
+                div_df["ex_date"].astype(str), format="%Y%m%d", errors="coerce"
+            )
+            target_date = pd.Timestamp(date_str)
+            known = div_df[div_df["ex_date_ts"] <= target_date]
+            if known.empty:
+                return 0.0
+            # ETF 每年通常只分红一次，取最近一次作为年度DPS
+            return float(known.iloc[-1]["cash_per_share"])
 
         div_df = div_df.copy()
         div_df["ex_date_ts"] = pd.to_datetime(
@@ -610,11 +691,22 @@ class BacktestEngine:
         # 按 end_date 的自然年度归组，取最近一个完整年度
         known = known.copy()
         known["fiscal_year"] = known["end_date"].astype(str).str[:4]
-        # 按 fiscal_year 降序，取最近年度的全部分红之和
-        latest_year = known["fiscal_year"].max()
-        latest_year_dps = known[known["fiscal_year"] == latest_year]["cash_per_share"].sum()
+        known["report_period"] = known["end_date"].astype(str).str[4:8]
 
-        return float(latest_year_dps)
+        # 从最近年度往前找，跳过"只有中期分红、没有年报分红"的不完整年度
+        # 例如：2025年只有中报(0630)分红0.5元，年报(1231)还没除权，
+        # 此时不应用0.5作为全年DPS，应回退到2024年度
+        for year in sorted(known["fiscal_year"].unique(), reverse=True):
+            year_data = known[known["fiscal_year"] == year]
+            has_annual = (year_data["report_period"] == "1231").any()
+            if has_annual:
+                # 有年报的年度才是完整年度，取该年全部分红之和
+                return float(year_data["cash_per_share"].sum())
+            # 没有年报但有多条分红的年度（如中报+三季报），也算不完整，跳过
+
+        # 所有年度都没有年报分红（极端情况），回退到最近年度的全部分红之和
+        latest_year = known["fiscal_year"].max()
+        return float(known[known["fiscal_year"] == latest_year]["cash_per_share"].sum())
 
     # 中国10年期国债收益率历史关键节点（%）
     # 数据来源：Wind / 中国债券信息网
@@ -824,7 +916,7 @@ class BacktestEngine:
             else:
                 s2 = 0
 
-            # S3 等效分红评分（含回购数据）
+            # S3 等效分红评分（含回购数据，对齐 dividend_evaluator 分级表）
             if category == "消费成长红利":
                 if effective_yield >= 9.0:
                     s3 = 20
@@ -834,16 +926,26 @@ class BacktestEngine:
                     s3 = 12
                 else:
                     s3 = 5
-            else:
-                # 非消费类：纯现金分红
-                if sector_thresholds:
-                    full_line = sector_thresholds.get("full", 7.0)
-                    if sim_div_yield >= full_line:
-                        s3 = 20
-                    else:
-                        s3 = min(20, max(0, sim_div_yield / full_line * 20))
+            elif category == "ETF红利":
+                # ETF 红利：类似弱周期
+                if effective_yield >= 7.0:
+                    s3 = 20
+                elif effective_yield >= 5.5:
+                    s3 = 16
+                elif effective_yield >= 4.0:
+                    s3 = 11
                 else:
-                    s3 = min(20, max(0, sim_div_yield * 3))
+                    s3 = 5
+            else:
+                # 弱周期/周期资源：等效分红（现金+回购）分级评分
+                if effective_yield >= 7.0:
+                    s3 = 20
+                elif effective_yield >= 5.5:
+                    s3 = 16
+                elif effective_yield >= 4.0:
+                    s3 = 11
+                else:
+                    s3 = 5
 
             # S4 确定性评分
             certainty_score = {"AA": 15, "A": 13, "A-": 11, "B+": 8, "B": 5}.get(
@@ -925,55 +1027,110 @@ class BacktestEngine:
         self,
         actions: List[RebalanceAction],
         prices: Dict[str, float],
+        cash_etf_price: Optional[float] = None,
     ):
-        """执行调仓指令"""
+        """执行调仓指令，现金不足时自动卖出 511880"""
+        # 先执行所有卖出（释放现金）
+        total_value = self.portfolio.total_value
         for action in actions:
+            if action.action != "sell":
+                continue
             ts_code = action.ts_code
+            if ts_code == self.CASH_ETF_CODE:
+                continue
             price = prices.get(ts_code)
-
             if price is None or price <= 0:
                 continue
 
-            total_value = self.portfolio.total_value
+            pos = self.portfolio.positions.get(ts_code)
+            if pos and pos.shares > 0:
+                current_mv = pos.market_value
+                target_mv = action.target_weight * total_value
+                sell_mv = current_mv - target_mv
 
-            if action.action == "buy":
-                # 计算目标买入金额
-                target_amount = action.weight_delta * total_value
-                if target_amount > 0:
-                    self.portfolio.buy(
-                        ts_code=ts_code,
-                        name=action.name,
-                        category=action.category,
-                        price=price,
-                        target_amount=target_amount,
-                        reason=action.reason,
+                if sell_mv > 0 and current_mv > 0:
+                    sell_ratio = sell_mv / current_mv
+                    sell_shares = int(pos.shares * sell_ratio / 100) * 100
+                    if sell_shares > 0:
+                        self.portfolio.sell(
+                            ts_code=ts_code,
+                            price=price,
+                            shares=sell_shares,
+                            reason=action.reason,
+                        )
+                    elif target_mv <= 0:
+                        self.portfolio.sell(
+                            ts_code=ts_code,
+                            price=price,
+                            reason=action.reason,
+                        )
+
+        # 再执行买入（现金不足时卖 511880）
+        for action in actions:
+            if action.action != "buy":
+                continue
+            ts_code = action.ts_code
+            if ts_code == self.CASH_ETF_CODE:
+                continue
+            price = prices.get(ts_code)
+            if price is None or price <= 0:
+                continue
+
+            target_amount = action.weight_delta * total_value
+            if target_amount <= 0:
+                continue
+
+            # 现金不足 → 卖出部分 511880
+            if self.portfolio.cash < target_amount and cash_etf_price and cash_etf_price > 0:
+                shortage = target_amount - self.portfolio.cash
+                cash_etf_pos = self.portfolio.positions.get(self.CASH_ETF_CODE)
+                if cash_etf_pos and cash_etf_pos.shares > 0:
+                    # 加上手续费预留
+                    need_with_fee = shortage * 1.003
+                    sell_shares = min(
+                        int(need_with_fee / cash_etf_price / 100) * 100 + 100,
+                        cash_etf_pos.shares,
                     )
+                    sell_shares = min(sell_shares, cash_etf_pos.shares)
+                    if sell_shares > 0:
+                        self.portfolio.sell(
+                            ts_code=self.CASH_ETF_CODE,
+                            price=cash_etf_price,
+                            shares=sell_shares,
+                            reason="释放现金用于调仓",
+                        )
 
-            elif action.action == "sell":
-                pos = self.portfolio.positions.get(ts_code)
-                if pos and pos.shares > 0:
-                    # 计算需要卖出的股数
-                    current_mv = pos.market_value
-                    target_mv = action.target_weight * total_value
-                    sell_mv = current_mv - target_mv
+            self.portfolio.buy(
+                ts_code=ts_code,
+                name=action.name,
+                category=action.category,
+                price=price,
+                target_amount=target_amount,
+                reason=action.reason,
+            )
 
-                    if sell_mv > 0 and current_mv > 0:
-                        sell_ratio = sell_mv / current_mv
-                        sell_shares = int(pos.shares * sell_ratio / 100) * 100
-                        if sell_shares > 0:
-                            self.portfolio.sell(
-                                ts_code=ts_code,
-                                price=price,
-                                shares=sell_shares,
-                                reason=action.reason,
-                            )
-                        elif target_mv <= 0:
-                            # 清仓
-                            self.portfolio.sell(
-                                ts_code=ts_code,
-                                price=price,
-                                reason=action.reason,
-                            )
+    def _sweep_to_cash_etf(self, price: float):
+        """将剩余现金全部买入 511880（银华日利），扣除手续费后取整到 100 份"""
+        if self.portfolio.cash <= 0:
+            return
+
+        # 预留手续费
+        available = self.portfolio.cash
+        commission = max(available * self.portfolio.commission_rate, self.portfolio.min_commission)
+        effective_cash = available - commission
+        if effective_cash <= 0:
+            return
+
+        shares = int(effective_cash / price / 100) * 100
+        if shares > 0:
+            self.portfolio.buy(
+                ts_code=self.CASH_ETF_CODE,
+                name=self.CASH_ETF_NAME,
+                category="现金管理",
+                price=price,
+                target_amount=shares * price,
+                reason="闲置现金扫入",
+            )
 
     def run(
         self,
@@ -1052,23 +1209,31 @@ class BacktestEngine:
             # 处理分红（入账到现金）
             self._process_dividends(date_str)
 
+            # ── 现金管理：不提前卖511880，在执行调仓时按需卖出 ──
+            cash_etf_price = prices.get(self.CASH_ETF_CODE)
+
+
             # 模拟评分
             scores = self._simulate_scores_at_date(date_str)
             if not scores:
                 continue
 
-            # 计算当前权重
+            # 计算当前权重（排除现金管理ETF）
             total_val = self.portfolio.total_value
             current_weights = {}
             for ts_code, pos in self.portfolio.positions.items():
-                if pos.shares > 0 and total_val > 0:
+                if pos.shares > 0 and total_val > 0 and ts_code != self.CASH_ETF_CODE:
                     current_weights[ts_code] = pos.market_value / total_val
 
             # 生成调仓指令
             actions = self.strategy.generate_rebalance_actions(scores, current_weights)
 
-            # 执行调仓
-            self._execute_rebalance(actions, prices)
+            # 执行调仓（现金不足时自动卖出511880）
+            self._execute_rebalance(actions, prices, cash_etf_price)
+
+            # ── 现金管理：剩余现金扫入 511880 ──
+            if cash_etf_price and cash_etf_price > 0 and self.portfolio.cash > 0:
+                self._sweep_to_cash_etf(cash_etf_price)
 
             # 记录持仓快照
             self.portfolio.record_holding_snapshot()
@@ -1162,12 +1327,17 @@ class BacktestEngine:
             cash_series.loc[mask] = float(snap["cash"])
 
         # 4. 构建累计分红序列
-        # 将分红记录按除权日映射到日线索引
+        # 将分红记录按调仓日映射到日线索引（调仓日可能为非交易日，如节假日前补休）
         cum_div_series = pd.Series(0.0, index=date_index)
         for rec in self.portfolio.dividend_records:
             rec_date = pd.Timestamp(rec["date"])
             if rec_date in cum_div_series.index:
                 cum_div_series.loc[rec_date] += rec.get("net_dividend", 0)
+            else:
+                # 调仓日非交易日 → 映射到最近的前一交易日
+                valid = date_index[date_index <= rec_date]
+                if not valid.empty:
+                    cum_div_series.loc[valid[-1]] += rec.get("net_dividend", 0)
         cum_div_series = cum_div_series.cumsum()
 
         # 5. 计算每日总资产 = 现金 + 持仓市值
