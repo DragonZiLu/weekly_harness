@@ -541,6 +541,10 @@ class BacktestEngine:
                 continue
 
             meta = self._stock_meta.get(ts_code, {})
+            # 现金管理ETF使用 fund_nav 复权净值定价，价格已含分红再投资，
+            # 不再单独处理现金分红，避免双算
+            if meta.get("category") == "现金管理":
+                continue
             name = meta.get("name", ts_code)
 
             for _, row in div_df.iterrows():
