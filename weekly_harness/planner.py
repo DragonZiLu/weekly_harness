@@ -64,42 +64,63 @@ class WeeklyPlanner:
 
     def _get_bond_yield_tushare(self) -> Optional[float]:
         """
-        从 tushare 获取10年国债收益率
-        使用 shibor 接口近似（tushare 免费版无直接国债收益率接口）
-        退而求其次：从 CN_BOND 宏观数据读取
+        获取10年国债收益率（多源后备）
+
+        数据源优先级：
+          1. tushare yc_cb 接口（国债收益率曲线，需付费账号）
+          2. 华尔街见闻 API（免费、公开，当前收益率快照）
         """
+        # ── 数据源 1：tushare yc_cb ──
         try:
             import tushare as ts
             ts.set_token(tushare_cfg.token)
             pro = ts.pro_api()
 
-            # 尝试从宏观利率数据获取
             today = datetime.now().strftime("%Y%m%d")
-            # 30天内的数据
             from datetime import timedelta
             start = (datetime.now() - timedelta(days=30)).strftime("%Y%m%d")
 
-            df = pro.cn_gdp(fields="quarter,gdp")  # 测试连通性
-            if df is not None:
-                # tushare 有国债收益率接口（需要更高权限）
-                # 使用 yc_cb 接口（国债收益率曲线）
-                try:
-                    df_yc = pro.yc_cb(
-                        ts_code="1000010.IB",  # 10年期国债
-                        start_date=start,
-                        end_date=today,
-                        fields="ts_code,trade_date,yield"
-                    )
-                    if df_yc is not None and not df_yc.empty:
-                        latest = df_yc.sort_values("trade_date", ascending=False).iloc[0]
-                        yield_val = float(latest["yield"])
-                        if 0.5 <= yield_val <= 6.0:  # 合理范围检查
-                            print(f"  ✅ 10年国债收益率 (tushare): {yield_val:.2f}%")
-                            return yield_val
-                except Exception:
-                    pass
+            try:
+                df_yc = pro.yc_cb(
+                    ts_code="1000010.IB",
+                    start_date=start,
+                    end_date=today,
+                    fields="ts_code,trade_date,yield"
+                )
+                if df_yc is not None and not df_yc.empty:
+                    latest = df_yc.sort_values("trade_date", ascending=False).iloc[0]
+                    yield_val = float(latest["yield"])
+                    if 0.5 <= yield_val <= 6.0:
+                        print(f"  ✅ 10年国债收益率 (tushare yc_cb): {yield_val:.2f}%")
+                        return yield_val
+            except Exception:
+                pass
         except Exception:
             pass
+
+        # ── 数据源 2：华尔街见闻实时行情 ──
+        try:
+            import urllib.request
+            url = (
+                "https://api-ddc-wscn.awtmt.com/market/real"
+                "?fields=prod_name,last_px&prod_code=CN10YR.OTC"
+            )
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "Mozilla/5.0",
+                "Origin": "https://www.wallstreetcn.com",
+            })
+            resp = urllib.request.urlopen(req, timeout=5)
+            data = json.loads(resp.read().decode("utf-8"))
+            snapshot = data.get("data", {}).get("snapshot", {})
+            cn10yr = snapshot.get("CN10YR.OTC", [])
+            if len(cn10yr) >= 2:
+                yield_val = float(cn10yr[1])
+                if 0.5 <= yield_val <= 6.0:
+                    print(f"  ✅ 10年国债收益率 (华尔街见闻): {yield_val:.2f}%")
+                    return yield_val
+        except Exception:
+            pass
+
         return None
 
     def get_bond_yield(self) -> float:
