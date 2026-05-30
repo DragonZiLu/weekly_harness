@@ -51,9 +51,7 @@ from weekly_harness.reporter import WeeklyReporter
 
 
 def run_weekly_evaluation(args=None):
-    """完整的每周评估流程"""
-    """
-    完整的每周评估流程
+    """完整的每周评估流程
 
     遵循 Harness 框架：每个 Phase 输出显式 artifact，
     问题可追溯，下游组件通过 artifact 而非直接调用传递数据。
@@ -62,10 +60,16 @@ def run_weekly_evaluation(args=None):
 
     # 默认 args
     if args is None:
-        args = argparse.Namespace(force=False)
+        args = argparse.Namespace(force=False, week=None)
 
     now = datetime.now()
-    iso_week = now.strftime("%G-W%V")
+
+    # 支持 --week 指定历史周（如 2026-W21），否则用当前周
+    if getattr(args, "week", None):
+        iso_week = args.week
+        print(f"\n⚠️  历史重跑模式：目标周次 = {iso_week}")
+    else:
+        iso_week = now.strftime("%G-W%V")
 
     print("\n" + "=" * 60)
     print("  🌊 红利周期投资 — 周度量化评估系统")
@@ -83,7 +87,7 @@ def run_weekly_evaluation(args=None):
     # ─────────────────────────────────────────────────────────
     try:
         planner = WeeklyPlanner()
-        plan = planner.run(artifacts_dir=artifacts_dir)
+        plan = planner.run(artifacts_dir=artifacts_dir, week_override=iso_week if getattr(args, "week", None) else None)
     except Exception as e:
         print(f"\n❌ Planner 失败: {e}")
         import traceback; traceback.print_exc()
@@ -166,5 +170,7 @@ def run_weekly_evaluation(args=None):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="红利周期投资周度评估")
     parser.add_argument("--force", action="store_true", help="强制覆盖该周历史数据（整周替换）")
+    parser.add_argument("--week", type=str, default=None,
+                        help="指定重跑的周次（如 2026-W21），默认为当前周")
     args = parser.parse_args()
     run_weekly_evaluation(args)

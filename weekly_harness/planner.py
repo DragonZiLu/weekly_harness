@@ -143,9 +143,14 @@ class WeeklyPlanner:
                 codes.append(meta["ts_code"])
         return codes
 
-    def run(self, artifacts_dir: Optional[Path] = None) -> Dict:
+    def run(self, artifacts_dir: Optional[Path] = None, week_override: Optional[str] = None) -> Dict:
         """
         执行规划，生成 weekly_plan.json
+
+        Parameters
+        ----------
+        week_override : str, optional
+            强制使用指定的周次（如 "2026-W21"），用于历史重跑
 
         Returns
         -------
@@ -156,7 +161,7 @@ class WeeklyPlanner:
         print("─" * 50)
 
         now = datetime.now()
-        iso_week = now.strftime("%G-W%V")
+        iso_week = week_override if week_override else now.strftime("%G-W%V")
         today_str = now.strftime("%Y-%m-%d")
 
         # 获取国债收益率
