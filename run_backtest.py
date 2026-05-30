@@ -62,6 +62,7 @@ def run_backtest(args):
         slippage=args.slippage / 100,
         rebalance_freq=args.freq,
         periodic_injection=args.injection,
+        injection_until=args.injection_until,
     )
 
     start_time = time.time()
@@ -149,6 +150,8 @@ def main():
                         help="调仓频率: quarterly=季度, semiannual=半年度, monthly=月度, weekly=周度 (默认: quarterly)")
     parser.add_argument("--injection", type=float, default=0.0,
                         help="每期追加资金（元），首次不追加 (默认: 0)")
+    parser.add_argument("--injection-until", type=str, default=None,
+                        help="追加截止日期 YYYY-MM-DD（含），之后不再追加 (默认: 无限制)")
 
     # 策略参数
     parser.add_argument("--max-weight", type=float, default=15, help="大胆攒股单标的权重%% (默认: 15)")

@@ -6,8 +6,8 @@ from weekly_harness.backtest import PerformanceMetrics
 
 
 class PerformanceMetricsTests(unittest.TestCase):
-    def test_annual_return_uses_trading_day_duration(self):
-        result = PerformanceMetrics.annual_return(total_return=10.0, trading_days=244)
+    def test_annual_return_uses_calendar_day_duration(self):
+        result = PerformanceMetrics.annual_return(total_return=10.0, calendar_days=365)
 
         self.assertAlmostEqual(result, 10.0)
 

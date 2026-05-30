@@ -58,11 +58,11 @@ class PerformanceMetrics:
     """策略绩效指标计算器"""
 
     @staticmethod
-    def annual_return(total_return: float, trading_days: int) -> float:
+    def annual_return(total_return: float, calendar_days: int) -> float:
         """年化收益率"""
-        if trading_days <= 0:
+        if calendar_days <= 0:
             return 0.0
-        years = trading_days / 244  # 约244个交易日/年
+        years = calendar_days / 365  # 自然日/年
         if years <= 0:
             return 0.0
         return ((1 + total_return / 100) ** (1 / years) - 1) * 100
@@ -522,6 +522,7 @@ class BacktestEngine:
         slippage: float = 0.001,
         rebalance_freq: str = "quarterly",
         periodic_injection: float = 0.0,
+        injection_until: Optional[str] = None,
     ):
         self.strategy = DividendCycleStrategy(strategy_params)
         self.portfolio = Portfolio(
@@ -533,6 +534,7 @@ class BacktestEngine:
         self.fetcher = BacktestDataFetcher()
         self.rebalance_freq = rebalance_freq
         self.periodic_injection = periodic_injection  # 每期追加资金（元）
+        self.injection_until = injection_until  # 追加截止日期（含），之后不再追加
         self.metrics = PerformanceMetrics()
         self.rebalance_freq = rebalance_freq
         self.total_invested = initial_cash  # 累计投入（含追加），用于正确计算收益率
@@ -1296,10 +1298,15 @@ class BacktestEngine:
         for i, date_str in enumerate(rebalance_dates):
             self.portfolio.set_date(date_str)
 
-            # ── 定期追加资金（初始资金 > 0 时首次不追加避免双算；初始为 0 时首次也追加）──
+            # ── 定期追加资金（初始资金 > 0 时首次不追加；初始为 0 时首次也追加）──
+            # injection_until: 追加截止日期（含），之后停止注入
             if self.periodic_injection > 0 and (i > 0 or self.portfolio.initial_cash <= 0):
-                self.portfolio.cash += self.periodic_injection
-                self.total_invested += self.periodic_injection
+                can_inject = True
+                if self.injection_until:
+                    can_inject = date_str <= self.injection_until
+                if can_inject:
+                    self.portfolio.cash += self.periodic_injection
+                    self.total_invested += self.periodic_injection
 
             # 获取当前价格
             prices = {}
@@ -1787,9 +1794,11 @@ class BacktestEngine:
         total_return = (self.portfolio.total_value / self.total_invested - 1) * 100 if self.total_invested > 0 else 0
 
         if not daily_nav_df.empty and len(daily_nav_df) > 1:
-            # 使用真实交易日数量计算绩效
-            trading_days = len(daily_nav_df)
-            annual_return = self.metrics.annual_return(total_return, trading_days)
+            # 使用自然日计算年化
+            first_dt = pd.Timestamp(daily_nav_df["date"].iloc[0])
+            last_dt = pd.Timestamp(daily_nav_df["date"].iloc[-1])
+            calendar_days = (last_dt - first_dt).days
+            annual_return = self.metrics.annual_return(total_return, calendar_days)
 
             # 最大回撤（基于日线净值）
             daily_nav_series = daily_nav_df.set_index("date")["total_value"]
@@ -1799,11 +1808,11 @@ class BacktestEngine:
             daily_returns = daily_nav_df["total_value"].pct_change().dropna()
             sharpe = self.metrics.sharpe_ratio(daily_returns)
         else:
-            # 回退：基于调仓日净值（不乘5，用实际天数估算）
+            # 回退：基于调仓日净值（使用自然日）
             first_date = pd.Timestamp(nav_df["date"].iloc[0])
             last_date = pd.Timestamp(nav_df["date"].iloc[-1])
-            trading_days = max(1, int((last_date - first_date).days * 5 / 7))
-            annual_return = self.metrics.annual_return(total_return, trading_days)
+            calendar_days = max(1, (last_date - first_date).days)
+            annual_return = self.metrics.annual_return(total_return, calendar_days)
             nav_series = nav_df.set_index("date")["total_value"]
             max_dd = self.metrics.max_drawdown(nav_series)
             if len(nav_df) > 1:
@@ -1872,7 +1881,7 @@ class BacktestEngine:
             "benchmark_code": primary_bc,
             "benchmark_name": primary_bm.get("name", primary_bc),
             "benchmark_comparisons": benchmark_comparisons,
-            "trading_periods": trading_days,
+            "trading_periods": calendar_days,
             "rebalance_freq": self.rebalance_freq,
             "total_dividend": round(total_dividend, 2),
             "dividend_count": len(dividend_records),
