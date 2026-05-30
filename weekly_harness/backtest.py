@@ -12,11 +12,19 @@ Backtest — 回测引擎
 
 调仓频率：
   - quarterly (默认): 每季度末最后一个交易日调仓
+  - semiannual: 每半年度（6月、12月）最后一个周五调仓
+  - monthly: 每月末最后一个周五调仓
   - weekly: 每周五调仓
 
 使用方法：
   # 季度调仓回测（默认）
   python -m weekly_harness.backtest --start 2024-01-01 --end 2026-05-01
+
+  # 半年度调仓回测
+  python -m weekly_harness.backtest --start 2024-01-01 --freq semiannual
+
+  # 月度调仓回测
+  python -m weekly_harness.backtest --start 2024-01-01 --freq monthly
 
   # 周度调仓回测
   python -m weekly_harness.backtest --start 2024-01-01 --freq weekly
@@ -346,6 +354,82 @@ class BacktestDataFetcher:
 
         return dates
 
+    def get_semi_annual_end_dates(self, start_date: str, end_date: str) -> List[str]:
+        """
+        获取回测期间的所有半年度最后一个周五日期（半年度调仓日）
+
+        半年度调仓月: 6月、12月
+        取每半年度最后一个周五作为调仓日
+        """
+        start = pd.Timestamp(start_date)
+        end = pd.Timestamp(end_date)
+        dates = []
+
+        # 遍历年份，每年生成 6 月和 12 月两个调仓日
+        for year in range(start.year, end.year + 1):
+            for month in [6, 12]:
+                month_start = pd.Timestamp(year, month, 1)
+                # 当月最后一天
+                if month == 12:
+                    next_m = pd.Timestamp(year + 1, 1, 1)
+                else:
+                    next_m = pd.Timestamp(year, month + 1, 1)
+                month_end = next_m - pd.Timedelta(days=1)
+
+                fridays = pd.date_range(start=month_start, end=month_end, freq="W-FRI")
+                if not fridays.empty:
+                    last_friday = fridays[-1]
+                    if start <= last_friday <= end:
+                        dates.append(last_friday.strftime("%Y-%m-%d"))
+
+        return dates
+
+    def get_month_end_dates(self, start_date: str, end_date: str) -> List[str]:
+        """
+        获取回测期间的所有月末最后一个周五日期（月度调仓日）
+
+        取每个自然月的最后一个周五作为调仓日
+        """
+        start = pd.Timestamp(start_date)
+        end = pd.Timestamp(end_date)
+        dates = []
+
+        # 从起始月份开始逐月处理
+        current_year = start.year
+        current_month = start.month
+        while True:
+            # 当月第一天
+            month_start = pd.Timestamp(current_year, current_month, 1)
+            if month_start > end:
+                break
+
+            # 当月最后一天
+            if current_month == 12:
+                next_month = pd.Timestamp(current_year + 1, 1, 1)
+            else:
+                next_month = pd.Timestamp(current_year, current_month + 1, 1)
+            month_end = next_month - pd.Timedelta(days=1)
+
+            # 找该月最后一个周五（且不早于 start）
+            fridays_in_month = pd.date_range(
+                start=month_start,
+                end=month_end,
+                freq="W-FRI",
+            )
+            if not fridays_in_month.empty:
+                last_friday = fridays_in_month[-1]
+                if start <= last_friday <= end:
+                    dates.append(last_friday.strftime("%Y-%m-%d"))
+
+            # 下一个月
+            if current_month == 12:
+                current_month = 1
+                current_year += 1
+            else:
+                current_month += 1
+
+        return dates
+
     def fetch_dividend_data(
         self,
         ts_code: str,
@@ -437,6 +521,7 @@ class BacktestEngine:
         commission_rate: float = 0.001,
         slippage: float = 0.001,
         rebalance_freq: str = "quarterly",
+        periodic_injection: float = 0.0,
     ):
         self.strategy = DividendCycleStrategy(strategy_params)
         self.portfolio = Portfolio(
@@ -446,8 +531,11 @@ class BacktestEngine:
             dividend_reinvest=True,
         )
         self.fetcher = BacktestDataFetcher()
+        self.rebalance_freq = rebalance_freq
+        self.periodic_injection = periodic_injection  # 每期追加资金（元）
         self.metrics = PerformanceMetrics()
-        self.rebalance_freq = rebalance_freq  # "quarterly" or "weekly"
+        self.rebalance_freq = rebalance_freq
+        self.total_invested = initial_cash  # 累计投入（含追加），用于正确计算收益率
 
         # 股票元数据
         self._stock_meta: Dict[str, Dict] = {}
@@ -810,41 +898,43 @@ class BacktestEngine:
         """
         模拟指定日期的评分数据
 
-        方案1: 使用 weekly_history.csv 中已有的周度评分（实时评分，无前视偏差）
-        方案2: 基于历史分红数据 + 历史价格模拟评分（无前视偏差版本）
+        方案1: weekly_history.csv 中的实时评分（CSV有的标优先用实时），
+              缺失标的回退到历史模拟评分
+        方案2: 完全没有 CSV 时，全部基于历史分红+价格模拟评分
         """
-        # 尝试从 weekly_history.csv 获取
+        # ── 始终先生成模拟评分作为兜底 ──
+        simulated = self._simulate_simple_scores(date_str)
+
+        # ── 尝试用 weekly_history.csv 中的实时评分覆盖 ──
         history_csv = _PROJECT_ROOT / "data" / "weekly_history.csv"
         if history_csv.exists():
-            df = pd.read_csv(history_csv, encoding="utf-8")
-            df["date"] = pd.to_datetime(df["date"])
-            target = pd.Timestamp(date_str)
+            try:
+                df = pd.read_csv(history_csv, encoding="utf-8")
+                df["date"] = pd.to_datetime(df["date"])
+                target = pd.Timestamp(date_str)
 
-            # 取 <= 目标日期的最近一周数据
-            valid = df[df["date"] <= target]
-            if not valid.empty:
-                latest_week = valid["week"].max()
-                week_data = valid[valid["week"] == latest_week]
+                valid = df[df["date"] <= target]
+                if not valid.empty:
+                    latest_week = valid["week"].max()
+                    week_data = valid[valid["week"] == latest_week]
 
-                scores = {}
-                for _, row in week_data.iterrows():
-                    scores[row["ts_code"]] = {
-                        "name": row["name"],
-                        "category": row["category"],
-                        "total_score": row["total_score"],
-                        "verdict": row["verdict"],
-                        "div_yield": row["div_yield"],
-                        "close": row["close"],
-                        "pe_ttm": row.get("pe_ttm", 0),
-                        "roe": row.get("roe", 0),
-                        "bond_spread_bp": row.get("bond_spread_bp", 0),
-                        "score_source": "实时评分",
-                    }
-                if scores:
-                    return scores
+                    for _, row in week_data.iterrows():
+                        simulated[row["ts_code"]] = {
+                            "name": row["name"],
+                            "category": row["category"],
+                            "total_score": row["total_score"],
+                            "verdict": row["verdict"],
+                            "div_yield": row["div_yield"],
+                            "close": row["close"],
+                            "pe_ttm": row.get("pe_ttm", 0),
+                            "roe": row.get("roe", 0),
+                            "bond_spread_bp": row.get("bond_spread_bp", 0),
+                            "score_source": "实时评分",
+                        }
+            except Exception:
+                pass
 
-        # 回退：基于价格模拟简化评分
-        return self._simulate_simple_scores(date_str)
+        return simulated
 
     def _simulate_simple_scores(self, date_str: str) -> Dict[str, Dict]:
         """
@@ -1164,6 +1254,7 @@ class BacktestEngine:
         self._price_data = {}
         self._dividend_data = {}
         self._stock_meta = {}
+        self.total_invested = self.portfolio.initial_cash
 
         # 初始化
         self._load_stock_meta()
@@ -1174,6 +1265,12 @@ class BacktestEngine:
         if self.rebalance_freq == "quarterly":
             rebalance_dates = self.fetcher.get_quarter_end_dates(start_date, end_date)
             freq_label = "季度末"
+        elif self.rebalance_freq == "semiannual":
+            rebalance_dates = self.fetcher.get_semi_annual_end_dates(start_date, end_date)
+            freq_label = "半年度"
+        elif self.rebalance_freq == "monthly":
+            rebalance_dates = self.fetcher.get_month_end_dates(start_date, end_date)
+            freq_label = "每月末"
         else:
             rebalance_dates = self.fetcher.get_friday_dates(start_date, end_date)
             freq_label = "每周五"
@@ -1182,6 +1279,8 @@ class BacktestEngine:
             print(f"\n  📅 回测期间: {start_date} ~ {end_date}")
             print(f"  📊 调仓频率: {freq_label}，共 {len(rebalance_dates)} 次")
             print(f"  💰 初始资金: {self.portfolio.initial_cash:,.0f} 元")
+            if self.periodic_injection > 0:
+                print(f"  💉 每期追加: {self.periodic_injection:,.0f} 元（首次不追加）")
             print(f"  📋 持仓标的: {len(self._stock_meta)} 只")
 
         # 获取基准数据（支持多基准）
@@ -1193,9 +1292,14 @@ class BacktestEngine:
         for bc in self._benchmark_codes:
             self._benchmarks[bc] = self.fetcher.fetch_benchmark_data(bc, start_date, end_date)
 
-        # 逐周模拟
+        # 逐期模拟
         for i, date_str in enumerate(rebalance_dates):
             self.portfolio.set_date(date_str)
+
+            # ── 定期追加资金（初始资金 > 0 时首次不追加避免双算；初始为 0 时首次也追加）──
+            if self.periodic_injection > 0 and (i > 0 or self.portfolio.initial_cash <= 0):
+                self.portfolio.cash += self.periodic_injection
+                self.total_invested += self.periodic_injection
 
             # 获取当前价格
             prices = {}
@@ -1257,7 +1361,7 @@ class BacktestEngine:
             self.portfolio.record_nav()
 
             if verbose and (i + 1) % 4 == 0:
-                ret = self.portfolio.total_return
+                ret = (self.portfolio.total_value / self.total_invested - 1) * 100 if self.total_invested > 0 else 0
                 print(f"  📈 第{i+1}次调仓 ({date_str}): 总收益 {ret:+.2f}%, "
                       f"持仓 {len([p for p in self.portfolio.positions.values() if p.shares > 0])} 只")
 
@@ -1679,8 +1783,8 @@ class BacktestEngine:
         # 构建逐交易日净值序列
         daily_nav_df = self._build_daily_nav(start_date, end_date)
 
-        # 基本指标
-        total_return = self.portfolio.total_return
+        # 基本指标（用 total_invested 而非 initial_cash，支持定期追加场景）
+        total_return = (self.portfolio.total_value / self.total_invested - 1) * 100 if self.total_invested > 0 else 0
 
         if not daily_nav_df.empty and len(daily_nav_df) > 1:
             # 使用真实交易日数量计算绩效
@@ -1720,7 +1824,7 @@ class BacktestEngine:
         # 红利统计
         dividend_records = self.portfolio.dividend_records
         total_dividend = sum(d.get("net_dividend", 0) for d in dividend_records)
-        dividend_contribution = total_dividend / self.portfolio.initial_cash * 100  # 红利贡献(%)
+        dividend_contribution = total_dividend / self.total_invested * 100  # 红利贡献(%)
 
         # 收益分解：股息收益 vs 股价收益
         # price_return = 总收益 - 股息收益（剔除分红后的纯资本增值）
@@ -1752,6 +1856,7 @@ class BacktestEngine:
         results = {
             "period": f"{start_date} ~ {end_date}",
             "initial_cash": self.portfolio.initial_cash,
+            "total_invested": round(self.total_invested, 2),
             "final_value": round(self.portfolio.total_value, 2),
             "total_return": round(total_return, 2),
             "annual_return": round(annual_return, 2),
@@ -1795,6 +1900,10 @@ class BacktestEngine:
         print(f"\n  ── 收益指标 ──")
         print(f"  回测期间:     {results['period']}")
         print(f"  初始资金:     {results['initial_cash']:,.0f} 元")
+        total_inv = results.get("total_invested", results["initial_cash"])
+        if total_inv > results["initial_cash"]:
+            inj_count = (total_inv - results["initial_cash"]) / (self.periodic_injection or 1)
+            print(f"  累计投入:     {total_inv:,.0f} 元（含{inj_count:.0f}次追加）")
         print(f"  最终资产:     {results['final_value']:,.2f} 元")
         print(f"  总收益率:     {results['total_return']:+.2f}%")
         print(f"    ├─ 股价收益: {results['price_return']:+.2f}%")
@@ -1807,7 +1916,8 @@ class BacktestEngine:
         print(f"  卡尔玛比率:   {results['calmar_ratio']:.2f}")
 
         print(f"\n  ── 交易统计 ──")
-        freq_label = "季度" if results.get('rebalance_freq') == 'quarterly' else "周"
+        freq_map = {"quarterly": "季度", "semiannual": "半年度", "monthly": "月度", "weekly": "周"}
+        freq_label = freq_map.get(results.get('rebalance_freq', 'quarterly'), "季度")
         print(f"  调仓次数:     {results['trading_periods']} 次（{freq_label}级）")
         print(f"  总交易次数:   {results['num_trades']}")
         print(f"  买入次数:     {results['buy_trades']}")
@@ -1817,7 +1927,7 @@ class BacktestEngine:
         print(f"\n  ── 红利收益 ──")
         print(f"  分红次数:     {results['dividend_count']} 次")
         print(f"  累计红利:     {results['total_dividend']:,.2f} 元")
-        print(f"  股息收益率:   {results['dividend_return']:+.2f}%（占初始资金）")
+        print(f"  股息收益率:   {results['dividend_return']:+.2f}%（占累计投入）")
         print(f"  股价收益率:   {results['price_return']:+.2f}%（剔除分红后）")
 
         print(f"\n  ── 基准对比 ──")
@@ -2034,7 +2144,8 @@ class BacktestEngine:
 
         # 交易统计
         lines.append("## 🔄 交易统计\n")
-        freq_label = "季度" if results.get('rebalance_freq') == 'quarterly' else "周"
+        freq_map = {"quarterly": "季度", "semiannual": "半年度", "monthly": "月度", "weekly": "周"}
+        freq_label = freq_map.get(results.get('rebalance_freq', 'quarterly'), "季度")
         lines.append(f"- 调仓次数: {results['trading_periods']} 次（{freq_label}级调仓）")
         lines.append(f"- 总交易次数: {results['num_trades']} (买入{results['buy_trades']}次, 卖出{results['sell_trades']}次)")
         lines.append(f"- 总手续费: {results['total_commission']:,.2f} 元")

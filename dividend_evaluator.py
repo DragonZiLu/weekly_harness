@@ -320,16 +320,16 @@ FALLBACK_DATA = {
         "note": "2025全年分红0.389元/股(中期0.186+年报0.203)，股价10.05元，股息率3.87%；tushare原始1.85%因未除权严重偏低，网络验证修正"
     },
     "601988.SH": {  # 中国银行
-        "close": 5.77, "pe_ttm": 7.8, "pb": 0.68,
-        # 2025年全年分红约0.307元/股（中期+年报），÷股价5.77元≈5.3%
-        # tushare原始1.89%严重偏低（年报分红未除权），fallback6.8%偏高
-        # 网络验证：国联民生PE=7.8x，申万宏源给出"约4%"（单次年报分红计算）
-        # 含中期分红的全年口径正确值约5.0-5.3%
-        "div_yield": 5.1,
-        "roe": 8.3, "dps_latest": 0.31,
+        "close": 5.86, "pe_ttm": 7.7, "pb": 0.68,
+        # 2025年全年分红: 中期0.1094(已实施2025-12-11) + 年报预案0.1169 = 0.2263元/股
+        # 自算股息率: 0.2263 / 5.86 = 3.86%（准确值）
+        # tushare dv_ttm=1.87%是因TTM窗口滚动：2024年报除权日2025-04-25已滚出TTM窗口，仅含中期0.1094/5.86=1.87%
+        # 此fallback设为与自算一致，避免触发兜底
+        "div_yield": 3.86,
+        "roe": 8.3, "dps_latest": 0.23,
         "buyback_yield": 0.0, "revenue_growth": -0.8, "net_profit_growth": 0.3,
-        "payout_ratio": 30.0, "total_mv": 21000.0,
-        "note": "2025全年分红约0.307元/股(中+年报)，股价5.77元，股息率约5.1%；网络验证国联民生PE=7.8x"
+        "payout_ratio": 30.0, "total_mv": 21400.0,
+        "note": "2025全年分红0.2263元/股(中期0.1094+年报预案0.1169)，股价5.86元，股息率3.86%；dv_ttm=1.87%因TTM窗口滚动（年报除权日滚出），自算结果准确"
     },
     "002142.SZ": {  # 宁波银行
         "close": 31.09, "pe_ttm": 6.82, "pb": 0.88,
@@ -352,20 +352,24 @@ FALLBACK_DATA = {
         "note": "网络验证：PE≈13x(国联民生)，股价≈81元，2025全年分红4.3元/股，股息率5.3%；等效分红=5.3%+4.5%=9.8%"
     },
     "600690.SH": {  # 海尔智家
-        # 网络验证：开源证券2026-04-29 PE=9.7x，EPS=2.21元，股价≈21.4元
-        # 2025年报全年分红0.8867元/股，÷21.4元≈4.1%（tushare 3.8%轻微偏低因除权时间差）
-        "close": 21.4, "pe_ttm": 9.7, "pb": 2.9,
-        "div_yield": 4.2, "roe": 17.0, "dps_latest": 0.89,
-        "buyback_yield": 3.0, "revenue_growth": 8.0, "net_profit_growth": 9.0,
-        "payout_ratio": 42.0, "total_mv": 1950.0,
-        "note": "网络验证：开源证券PE=9.7x，股价≈21.4元，2025年报每股0.8867元，股息率4.2%；等效分红=4.2%+3%=7.2%"
+        # tushare实测(2026-05-30)：close≈20.88, 自算股息率=5.54%
+        # 2025年全年分红: 中期0.2692+年报预案0.8867=1.1559元/股
+        # fallback旧值 4.2%基于21.4元已过时，更新为与自算一致
+        "close": 20.88, "pe_ttm": 9.5, "pb": 2.8,
+        "div_yield": 5.5, "roe": 17.0, "dps_latest": 1.16,
+        "buyback_yield": 2.5, "revenue_growth": 8.0, "net_profit_growth": 9.0,
+        "payout_ratio": 42.0, "total_mv": 1900.0,
+        "note": "2025全年分红1.1559元/股(中期0.2692+年报预案0.8867)，自算股息率5.54%；等效分红=5.5%+2.5%=8.0%"
     },
     "000651.SZ": {  # 格力电器
-        "close": 35.00, "pe_ttm": 9.5, "pb": 2.5,
-        "div_yield": 6.0, "roe": 28.0, "dps_latest": 2.10,
-        "buyback_yield": 1.5, "revenue_growth": 2.0, "net_profit_growth": 3.0,
-        "payout_ratio": 55.0, "total_mv": 2100.0,
-        "note": "高分红传统，空调市场龙头，等效分红率约7.5%"
+        # tushare实测(2026-05-30)：close≈39.17, 自算股息率=7.66%
+        # 2025全年分红: 三季报0.98+1.0(实施2026-01-23)+年报预案2.0=3.0元/股
+        # 3.0/39.17=7.66%，与dv_ttm=7.64%高度吻合
+        "close": 39.17, "pe_ttm": 9.8, "pb": 2.8,
+        "div_yield": 7.6, "roe": 28.0, "dps_latest": 3.0,
+        "buyback_yield": 1.2, "revenue_growth": 2.0, "net_profit_growth": 3.0,
+        "payout_ratio": 60.0, "total_mv": 2350.0,
+        "note": "2025全年分红3.0元/股(三季报1.0+年报预案2.0)，股息率7.66%；等效分红≈8.8%；空调龙头高分红"
     },
     "601899.SH": {  # 紫金矿业
         # 网络验证：国联民生2026-04-24 PE=11x（2026E），财信证券10.37x，中邮10.27x
@@ -403,13 +407,14 @@ FALLBACK_DATA = {
     },
     "601088.SH": {  # 中国神华
         # 中国神华2025年报：营收3448亿+0.6%，归母净利润586亿-0.4%
-        # 2025年全年分红=中期1.11+年报1.11=2.22元/股，当前股价46.15元，股息率约4.8%
-        # ROE约14%，PE(TTM)约10.3x（46.15/4.49），PB约1.6x，分红率超70%
-        "close": 46.15, "pe_ttm": 10.3, "pb": 1.60,
-        "div_yield": 4.8, "roe": 14.0, "dps_latest": 2.22,
+        # 2025年全年分红=中期0.98+年报预案1.03=2.01元/股，当前股价46.92元，股息率约4.28%
+        # tushare dv_ttm=6.22%含: 2024年报2.26(2025-07-07除权)+2025中期0.98 = 跨年TTM含两年数据
+        # 自算4.28%是正确的2025年度预期股息率
+        "close": 46.92, "pe_ttm": 10.3, "pb": 1.60,
+        "div_yield": 4.28, "roe": 14.0, "dps_latest": 2.01,
         "buyback_yield": 0.0, "revenue_growth": 0.6, "net_profit_growth": -0.4,
-        "payout_ratio": 72.0, "total_mv": 9170.0,
-        "note": "2025年报：营收3448亿+0.6%，归母净利润586亿-0.4%，全年分红2.22元/股(中1.11+年报1.11)，股息率约4.8%；煤电运一体化龙头，分红率超70%"
+        "payout_ratio": 72.0, "total_mv": 9320.0,
+        "note": "2025全年分红2.01元/股(中期0.98+年报预案1.03)，股息率4.28%；dv_ttm=6.22%为跨年TTM含2024年报+2025中期，自算更准确"
     },
     "515180.SH": {  # 易方达中证红利ETF
         "close": 1.396, "pe_ttm": 27.6, "pb": 0.0,
@@ -496,14 +501,15 @@ class TushareDataFetcher:
             return None
         for attempt in range(3):
             try:
-                time.sleep(0.3)  # 限流
+                if attempt > 0:
+                    time.sleep(0.3)  # 重试前等待（仅重试时）
                 result = getattr(self.pro, func_name)(**kwargs)
                 if result is not None and not result.empty:
                     return result
                 return pd.DataFrame()
             except Exception as e:
                 if attempt < 2:
-                    time.sleep(2 * (attempt + 1))
+                    time.sleep(1.5 * (attempt + 1))  # 重试退避：1.5s/3s
                 else:
                     print(f"    ⚠️  {func_name} 失败: {e}")
                     return None

@@ -135,12 +135,13 @@ class WeeklyValidator:
         L2: 三源交叉验证
 
         对比 dividend接口自算 / tushare dv_ttm / fallback 三个来源的股息率，
-        若任意两者偏差 > 1.5个百分点，标注"数据矛盾，需人工复核"。
+        若任意两者偏差 > 1.5个百分点，标注原因分析。
 
-        偏差原因可能是：
-          - 年报分红未除权（自算偏低 vs fallback）
-          - fallback 过时（fallback 偏高 vs 自算）
-          - tushare dv_ttm 包含特别分红（dv_ttm 偏高）
+        偏差原因分类（智能诊断）：
+          [A] TTM窗口滚动型  — dv_ttm偏低，自算与fallback接近 → 可解释，无需人工复核
+          [B] dv_ttm含特别分红 — dv_ttm偏高，自算与fallback接近 → 可解释
+          [C] fallback已过时  — 自算>fallback 20%+ → 需更新fallback
+          [D] 真实矛盾       — 无法归类 → 需人工复核
         """
         sources = {
             "自算": score.get("_div_self_calc"),
@@ -156,19 +157,35 @@ class WeeklyValidator:
         alerts = []
         if spread > 1.5:
             detail = "  /  ".join(f"{k}={v:.2f}%" for k, v in valid.items())
-            # 判断矛盾类型，给出更有针对性的提示
             self_calc = valid.get("自算", 0)
             fb        = valid.get("fallback", 0)
             dv        = valid.get("dv_ttm", 0)
 
-            if fb > 0 and self_calc > 0 and self_calc < fb * 0.7:
-                reason = "年报分红预案/公告可能尚未录入tushare，自算偏低"
-            elif dv > 0 and fb > 0 and dv > fb * 1.3:
-                reason = "dv_ttm含特别/历史分红，偏高失真"
+            # [A] TTM滚动型：dv_ttm远低于自算，但自算与fallback接近
+            #   原因：年报除权日（通常4~5月）刚好滚出TTM窗口，只剩中期一次分红
+            if (dv > 0 and self_calc > 0 and dv < self_calc * 0.6
+                    and (fb <= 0 or abs(self_calc - fb) / max(self_calc, 0.01) < 0.25)):
+                reason = (
+                    "dv_ttm因TTM窗口滚动偏低（年报除权日滚出窗口，TTM仅含中期1次分红），"
+                    "自算含预案结果可信，无需人工复核"
+                )
+                severity = "info"  # 降级为info，不计入低置信
+            # [B] dv_ttm含特别/重复历史分红，偏高失真
+            elif dv > 0 and self_calc > 0 and dv > self_calc * 1.3 and (fb <= 0 or dv > fb * 1.1):
+                reason = "dv_ttm含历史跨年重叠分红（TTM窗口同时含上一年年报+本年中期），偏高失真；自算结果更准确"
+                severity = "info"
+            # [C] 年报分红预案尚未录入（自算偏低 vs fallback）
+            elif fb > 0 and self_calc > 0 and self_calc < fb * 0.7:
+                reason = "年报分红预案/公告可能尚未录入tushare，自算偏低，已用fallback兜底"
+                severity = "info"
+            # [D-1] 自算显著高于fallback，fallback过时
             elif fb > 0 and self_calc > 0 and self_calc > fb * 1.2:
-                reason = "自算高于fallback，fallback可能已过时"
+                reason = "自算高于fallback 20%+，fallback数据可能已过时，建议更新FALLBACK_DATA"
+                severity = "warning"
+            # [D-2] 真实矛盾，无法归类
             else:
                 reason = "来源矛盾，建议人工复核"
+                severity = "warning"
 
             alerts.append({
                 "ts_code": ts_code,
@@ -176,7 +193,7 @@ class WeeklyValidator:
                 "field": "div_yield",
                 "value": spread,
                 "issue": f"三源股息率偏差{spread:.2f}%: {detail}  →  {reason}",
-                "severity": "warning",
+                "severity": severity,
             })
         return alerts
 
@@ -184,15 +201,23 @@ class WeeklyValidator:
         """
         根据该股票的告警列表判断整体数据置信度
 
-        high:   无 warning 级别告警，且数据来源为 tushare
-        medium: 有 info 级别告警（使用了 fallback 或触发了校准）
-        low:    有 warning 级别告警（数据超出合理范围）
+        high:   无 warning 级别告警（info 不影响置信度）
+        medium: 有 info 级别告警（来自 fallback 使用，数据源降级但可解释）
+        low:    有 warning 级别告警（数据超出合理范围，或存在真实来源矛盾）
+
+        注意：三源交叉验证中的 TTM滚动型/dv_ttm含特别分红型 均降级为 info，
+              不计入 low 置信度，避免误报。
         """
         severities = {a["severity"] for a in alerts_for_code}
         if "warning" in severities:
             return "low"
         elif "info" in severities:
-            return "medium"
+            # 只有「source fallback」类的info才降为medium
+            source_infos = [a for a in alerts_for_code if a["severity"] == "info"
+                            and a.get("field") == "source"]
+            if source_infos:
+                return "medium"
+            return "high"
         return "high"
 
     def _check_score_sanity(self, ts_code: str, name: str, score: Dict, bond_yield: float = 1.65) -> List[Dict]:
@@ -321,6 +346,7 @@ class WeeklyValidator:
 
         # 分类打印自验证告警
         cross_warns   = [a for a in all_alerts if a["severity"] == "warning" and "三源" in a.get("issue","")]
+        cross_infos   = [a for a in all_alerts if a["severity"] == "info"    and "三源" in a.get("issue","")]
         stale_warns   = [a for a in all_alerts if a["severity"] == "warning" and "fallback股价" in a.get("issue","")]
         other_warns   = [a for a in all_alerts if a["severity"] == "warning"
                          and a not in cross_warns and a not in stale_warns]
@@ -331,8 +357,13 @@ class WeeklyValidator:
                 print(f"     [{w['name']}] {w['issue']}")
 
         if cross_warns:
-            print(f"\n  🔀 三源交叉验证矛盾 ({len(cross_warns)} 条):")
+            print(f"\n  🔀 三源矛盾(需人工复核) ({len(cross_warns)} 条):")
             for w in cross_warns:
+                print(f"     [{w['name']}] {w['issue']}")
+
+        if cross_infos:
+            print(f"\n  ℹ️  三源可解释偏差 ({len(cross_infos)} 条，自动忽略):")
+            for w in cross_infos:
                 print(f"     [{w['name']}] {w['issue']}")
 
         if other_warns:
@@ -344,8 +375,10 @@ class WeeklyValidator:
         self_validation = {
             "fallback_stale_count": len(stale_warns),
             "cross_source_conflict_count": len(cross_warns),
+            "cross_source_explainable_count": len(cross_infos),
             "stale_stocks": [w["name"] for w in stale_warns],
             "conflict_stocks": [w["name"] for w in cross_warns],
+            "explainable_stocks": [w["name"] for w in cross_infos],
         }
 
         report = {

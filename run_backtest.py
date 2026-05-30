@@ -9,6 +9,9 @@ run_backtest.py — 红利周期轮动策略回测入口
   # 自定义参数
   python run_backtest.py --start 2023-01-01 --end 2026-05-01 --cash 500000
 
+  # 月度调仓回测
+  python run_backtest.py --freq monthly
+
   # 周度调仓回测
   python run_backtest.py --freq weekly
 
@@ -58,6 +61,7 @@ def run_backtest(args):
         commission_rate=args.commission / 100,
         slippage=args.slippage / 100,
         rebalance_freq=args.freq,
+        periodic_injection=args.injection,
     )
 
     start_time = time.time()
@@ -141,8 +145,10 @@ def main():
     parser.add_argument("--end", default=datetime.now().strftime("%Y-%m-%d"), help="回测结束日期 (默认: 今天)")
     parser.add_argument("--cash", type=float, default=1000000, help="初始资金 (默认: 100万)")
     parser.add_argument("--benchmark", default="000300.SH,515180.SH", help="基准指数，逗号分隔多基准 (默认: 沪深300,易方达红利ETF)")
-    parser.add_argument("--freq", default="quarterly", choices=["quarterly", "weekly"],
-                        help="调仓频率: quarterly=季度, weekly=周度 (默认: quarterly)")
+    parser.add_argument("--freq", default="quarterly", choices=["quarterly", "semiannual", "monthly", "weekly"],
+                        help="调仓频率: quarterly=季度, semiannual=半年度, monthly=月度, weekly=周度 (默认: quarterly)")
+    parser.add_argument("--injection", type=float, default=0.0,
+                        help="每期追加资金（元），首次不追加 (默认: 0)")
 
     # 策略参数
     parser.add_argument("--max-weight", type=float, default=15, help="大胆攒股单标的权重%% (默认: 15)")
