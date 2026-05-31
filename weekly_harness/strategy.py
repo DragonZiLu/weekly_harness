@@ -76,7 +76,7 @@ class StrategyParams:
 
     # ── 风控参数 ──
     max_single_stock: float = 0.20    # 单标的最大权重（硬上限）
-    max_positions: int = 12           # 最大持仓数
+    max_positions: int = 15           # 最大持仓数
     cash_reserve: float = 0.05       # 最低现金保留比例
 
     # ── 对冲参数 ──

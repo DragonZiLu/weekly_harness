@@ -117,6 +117,12 @@ COMPANIES = {
     "中药": {
         "云南白药": {"ts_code": "000538.SZ", "category": "消费成长红利", "certainty": "A-",
                    "moat": "百年国药品牌·白药系列垄断·大健康延伸", "comment": "中药第一品牌，混改后分红率大幅提升，分红+回购双轮驱动"},
+        "达仁堂": {"ts_code": "600329.SH", "category": "消费成长红利", "certainty": "B+",
+                   "moat": "速效救心丸独家品种·百年老字号", "comment": "中药老字号，股息率9.2%高分红，ROE 28.5%"},
+        "东阿阿胶": {"ts_code": "000423.SZ", "category": "消费成长红利", "certainty": "B+",
+                   "moat": "阿胶品类垄断·品牌壁垒极深", "comment": "阿胶龙头，分红29年稳健，股息率5.4%"},
+        "济川药业": {"ts_code": "600566.SH", "category": "消费成长红利", "certainty": "B",
+                   "moat": "蒲地蓝消炎口服液·儿科药强势", "comment": "中药细分龙头，股息率7.6%，负债率仅17%"},
     },
     # ── 第四类：ETF红利 ────────────────────────────────
     "ETF": {
@@ -513,6 +519,27 @@ FALLBACK_DATA = {
         "buyback_yield": 2.0, "revenue_growth": 5.0, "net_profit_growth": 8.5,
         "payout_ratio": 75.0, "total_mv": 887.0,
         "note": "2025全年分红2.60元/股(中期0.86+年报1.74)，股息率5.23%；百年国药品牌，混改后分红率超75%，等效分红≈7.2%"
+    },
+    "600329.SH": {  # 达仁堂
+        "close": 40.72, "pe_ttm": 14.4, "pb": 4.17,
+        "div_yield": 9.16, "roe": 28.5, "dps_latest": 2.45,
+        "buyback_yield": 0.0, "revenue_growth": -32.7, "net_profit_growth": -4.4,
+        "payout_ratio": 85.0, "total_mv": 314.0,
+        "note": "2025年报：速效救心丸独家品种，股息率9.16%，ROE 28.5%，分红21年；营收下滑因渠道调整"
+    },
+    "000423.SZ": {  # 东阿阿胶
+        "close": 49.99, "pe_ttm": 18.2, "pb": 3.26,
+        "div_yield": 5.40, "roe": 16.8, "dps_latest": 1.78,
+        "buyback_yield": 0.0, "revenue_growth": 8.8, "net_profit_growth": 11.7,
+        "payout_ratio": 60.0, "total_mv": 322.0,
+        "note": "2025年报：阿胶品类垄断，分红29年连续，股息率5.40%，业绩稳步回升"
+    },
+    "600566.SH": {  # 济川药业
+        "close": 27.53, "pe_ttm": 14.6, "pb": 1.69,
+        "div_yield": 7.57, "roe": 12.1, "dps_latest": 2.09,
+        "buyback_yield": 0.0, "revenue_growth": -22.4, "net_profit_growth": -29.8,
+        "payout_ratio": 80.0, "total_mv": 254.0,
+        "note": "2025年报：儿科中药细分龙头，股息率7.57%，负债率仅17.3%，轻资产高分红；利润下滑因集采影响"
     },
     "000568.SZ": {  # 泸州老窖
         # tushare实测(2026-05-26)：股价91.85元，PE=13.6x，dv_ttm=6.48%
