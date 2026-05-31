@@ -523,6 +523,7 @@ class BacktestEngine:
         rebalance_freq: str = "quarterly",
         periodic_injection: float = 0.0,
         injection_until: Optional[str] = None,
+        use_forward_yield: bool = False,
     ):
         self.strategy = DividendCycleStrategy(strategy_params)
         self.portfolio = Portfolio(
@@ -538,6 +539,7 @@ class BacktestEngine:
         self.metrics = PerformanceMetrics()
         self.rebalance_freq = rebalance_freq
         self.total_invested = initial_cash  # 累计投入（含追加），用于正确计算收益率
+        self.use_forward_yield = use_forward_yield  # True=用预期股息率评分，False=用历史股息率
 
         # 股票元数据
         self._stock_meta: Dict[str, Dict] = {}
@@ -968,14 +970,30 @@ class BacktestEngine:
                 # 无历史分红数据，跳过
                 continue
 
+            # ── 预期股息率（基于行业增速推算 forward_dps）──
+            sector_growth_map = {
+                "水电": 3.0, "运营商": 5.0, "银行": 4.0, "保险": 6.0,
+                "家电": 8.0, "白酒": 12.0, "中药": 8.0, "矿业": 15.0,
+                "石油": 5.0, "煤炭": -2.0, "火电": 8.0, "海运": -20.0, "ETF": 5.0,
+            }
+            growth = sector_growth_map.get(sector, 5.0)
+            forward_dps = trailing_dps * (1 + growth / 100)
+            forward_div_yield = forward_dps / price * 100 if price > 0 else 0
+
+            # ── 选择评分用的股息率 ──
+            if self.use_forward_yield:
+                scoring_yield = forward_div_yield
+            else:
+                scoring_yield = sim_div_yield
+
             # 息差（基点）
-            spread_bp = (sim_div_yield - bond_yield * 100) * 100  # 转为基点(BP)
+            spread_bp = (scoring_yield - bond_yield * 100) * 100  # 转为基点(BP)
 
             # ── 回购收益率（历史估算）──
             buyback_yield = self._get_buyback_yield_at_date(ts_code, date_str)
 
             # 等效分红率 = 现金股息率 + 回购收益率
-            effective_yield = sim_div_yield + buyback_yield
+            effective_yield = scoring_yield + buyback_yield
 
             # ── 行业股息率锚评分（替代统一阈值）──
             sector_thresholds = SECTOR_THRESHOLDS.get(sector, {})
@@ -1066,17 +1084,6 @@ class BacktestEngine:
             else:
                 verdict = "🚫 回避"
 
-            # ── 预期股息率（基于行业增速推算）──
-            # 简化：用行业平均增速估算 forward_dps
-            sector_growth = {
-                "水电": 3.0, "运营商": 5.0, "银行": 4.0, "保险": 6.0,
-                "家电": 8.0, "白酒": 12.0, "中药": 8.0, "矿业": 15.0,
-                "石油": 5.0, "煤炭": -2.0, "火电": 8.0, "ETF": 5.0,
-            }
-            growth = sector_growth.get(sector, 5.0)
-            forward_dps = trailing_dps * (1 + growth / 100)
-            forward_div_yield = forward_dps / price * 100 if price > 0 else 0
-
             # ── 网格交易区间（基于等效分红率）──
             grid = {}
             if sector_thresholds:
@@ -1104,7 +1111,8 @@ class BacktestEngine:
                 "sector": sector,
                 "total_score": round(total, 1),
                 "verdict": verdict,
-                "div_yield": round(sim_div_yield, 2),
+                "div_yield": round(scoring_yield, 2),
+                "trailing_div_yield": round(sim_div_yield, 2),
                 "buyback_yield": round(buyback_yield, 2),
                 "effective_yield": round(effective_yield, 2),
                 "forward_div_yield": round(forward_div_yield, 2),

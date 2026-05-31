@@ -9,6 +9,7 @@ data/weekly_history.csv.tmp
 data/dividend_report.md
 data/dividend_chart.png
 data/backtest/
+data/portfolio_state.json
 logs/
 *.egg-info/
 *.tmp

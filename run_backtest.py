@@ -63,6 +63,7 @@ def run_backtest(args):
         rebalance_freq=args.freq,
         periodic_injection=args.injection,
         injection_until=args.injection_until,
+        use_forward_yield=args.forward,
     )
 
     start_time = time.time()
@@ -83,7 +84,7 @@ def run_backtest(args):
 
 
 def run_plan_only(args):
-    """仅生成当周调仓计划（不执行回测）"""
+    """仅生成当季调仓计划，自动读取已记录的持仓"""
     print("\n" + "=" * 70)
     print("  📋 红利周期轮动策略 — 当季调仓计划")
     print(f"  📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
@@ -108,14 +109,34 @@ def run_plan_only(args):
     )
     strategy = DividendCycleStrategy(params)
 
-    # 当前无持仓，所有权重为0
+    # ── 读取已记录的持仓 ──
+    portfolio_state = _PROJECT_ROOT / "data" / "portfolio_state.json"
     current_weights = {}
-    for ts_code in scores:
-        current_weights[ts_code] = 0.0
+    total_value = args.cash  # 默认用 --cash 参数
+
+    if portfolio_state.exists():
+        try:
+            from weekly_harness.portfolio import Portfolio
+            portfolio = Portfolio.load_state(str(portfolio_state))
+            total_mv = sum(p.shares * p.current_price for p in portfolio.positions.values())
+            total_value = portfolio.cash + total_mv
+            if total_value > 0:
+                for code, pos in portfolio.positions.items():
+                    if pos.shares > 0:
+                        current_weights[code] = pos.market_value / total_value
+                print(f"\n  📊 已加载持仓: {len([w for w in current_weights.values() if w > 0])} 只, "
+                      f"总资产 ¥{total_value:,.0f}")
+        except Exception as e:
+            print(f"  ⚠️ 加载持仓失败: {e}")
+
+    if not current_weights:
+        print("  📭 无持仓记录，按空仓生成建仓计划")
+        for ts_code in scores:
+            current_weights[ts_code] = 0.0
 
     # 生成调仓指令
     actions = strategy.generate_rebalance_actions(scores, current_weights)
-    strategy.print_rebalance_plan(actions, total_value=args.cash)
+    strategy.print_rebalance_plan(actions, total_value=total_value)
 
 
 def main():
@@ -165,6 +186,7 @@ def main():
 
     # 模式
     parser.add_argument("--plan-only", action="store_true", help="仅生成当周调仓计划（不回测）")
+    parser.add_argument("--forward", action="store_true", help="使用预期股息率（forward yield）替代历史股息率进行评分")
 
     args = parser.parse_args()
 

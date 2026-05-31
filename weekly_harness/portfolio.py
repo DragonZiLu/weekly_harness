@@ -483,6 +483,8 @@ class Portfolio:
             "initial_cash": self.initial_cash,
             "cash": self.cash,
             "current_date": self.current_date,
+            "commission_rate": self.commission_rate,
+            "slippage": self.slippage,
             "positions": {
                 code: {
                     "ts_code": pos.ts_code,
@@ -509,3 +511,52 @@ class Portfolio:
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
+
+    @classmethod
+    def load_state(cls, path: str) -> "Portfolio":
+        """从 JSON 文件恢复组合状态"""
+        with open(path, "r", encoding="utf-8") as f:
+            state = json.load(f)
+
+        portfolio = cls(
+            initial_cash=state.get("initial_cash", 0),
+            commission_rate=state.get("commission_rate", 0.001),
+            slippage=state.get("slippage", 0.001),
+        )
+        portfolio.cash = state.get("cash", portfolio.initial_cash)
+        portfolio.current_date = state.get("current_date", "")
+
+        # 恢复持仓
+        for code, pos_data in state.get("positions", {}).items():
+            pos = Position(
+                ts_code=pos_data["ts_code"],
+                name=pos_data.get("name", ""),
+                category=pos_data.get("category", ""),
+                shares=pos_data.get("shares", 0),
+                cost_price=pos_data.get("cost_price", 0),
+                current_price=pos_data.get("current_price", 0),
+            )
+            pos.buy_lots = pos_data.get("buy_lots", [])
+            portfolio.positions[code] = pos
+
+        # 恢复交易记录
+        for t_data in state.get("trades", []):
+            trade = Trade(
+                date=t_data["date"],
+                ts_code=t_data["ts_code"],
+                name=t_data["name"],
+                action=t_data["action"],
+                price=t_data["price"],
+                shares=t_data["shares"],
+                amount=t_data["amount"],
+                commission=t_data["commission"],
+                reason=t_data.get("reason", ""),
+                category=t_data.get("category", ""),
+            )
+            portfolio.trades.append(trade)
+
+        # 恢复分红记录和快照
+        portfolio.dividend_records = state.get("dividend_records", [])
+        portfolio.holding_snapshots = state.get("holding_snapshots", [])
+
+        return portfolio
