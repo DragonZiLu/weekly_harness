@@ -524,6 +524,7 @@ class BacktestEngine:
         periodic_injection: float = 0.0,
         injection_until: Optional[str] = None,
         use_forward_yield: bool = False,
+        universe: str = "default",  # "default"=精选32 | "csi500"=中证500高股息84只 | "csi300"=沪深300高股息97只
     ):
         self.strategy = DividendCycleStrategy(strategy_params)
         self.portfolio = Portfolio(
@@ -540,6 +541,7 @@ class BacktestEngine:
         self.rebalance_freq = rebalance_freq
         self.total_invested = initial_cash  # 累计投入（含追加），用于正确计算收益率
         self.use_forward_yield = use_forward_yield  # True=用预期股息率评分，False=用历史股息率
+        self._universe = universe  # 股票池选择
 
         # 股票元数据
         self._stock_meta: Dict[str, Dict] = {}
@@ -560,21 +562,37 @@ class BacktestEngine:
     CASH_ETF_NAME = "银华日利"
 
     def _load_stock_meta(self):
-        """加载股票元数据（从 dividend_evaluator）"""
+        """加载股票元数据
+
+        universe 参数控制使用哪个股票池：
+          - "default"  : 使用 dividend_evaluator.py 中精选32只标的（默认）
+          - "csi500"   : 使用 csi500_universe.py 中证500高股息84只标的
+        """
         import sys
         sys.path.insert(0, str(_PROJECT_ROOT))
-        from dividend_evaluator import COMPANIES
 
-        for sector, companies in COMPANIES.items():
-            for name, meta in companies.items():
-                ts_code = meta["ts_code"]
-                self._stock_meta[ts_code] = {
-                    "name": name,
-                    "category": meta["category"],
-                    "certainty": meta.get("certainty", ""),
-                    "sector": sector,  # 行业细分（水电/银行/家电等）
-                    "is_etf": meta["category"] == "ETF红利",
-                }
+        universe = getattr(self, "_universe", "default")
+
+        if universe == "csi500":
+            from csi500_universe import get_csi500_stock_meta
+            for ts_code, meta in get_csi500_stock_meta().items():
+                self._stock_meta[ts_code] = meta
+        elif universe == "csi300":
+            from csi300_universe import get_csi300_stock_meta
+            for ts_code, meta in get_csi300_stock_meta().items():
+                self._stock_meta[ts_code] = meta
+        else:
+            from dividend_evaluator import COMPANIES
+            for sector, companies in COMPANIES.items():
+                for name, meta in companies.items():
+                    ts_code = meta["ts_code"]
+                    self._stock_meta[ts_code] = {
+                        "name": name,
+                        "category": meta["category"],
+                        "certainty": meta.get("certainty", ""),
+                        "sector": sector,
+                        "is_etf": meta["category"] == "ETF红利",
+                    }
 
         # 现金管理 ETF（闲置资金自动买入，不参与评分）
         self._stock_meta[self.CASH_ETF_CODE] = {
@@ -1266,6 +1284,9 @@ class BacktestEngine:
         self._stock_meta = {}
         self.total_invested = self.portfolio.initial_cash
 
+        # ── 评分来源统计（用于报告透明度） ──
+        self._score_source_stats: Dict[str, int] = {"实时评分": 0, "历史模拟": 0}
+
         # 初始化
         self._load_stock_meta()
         self._fetch_all_prices(start_date, end_date)
@@ -1340,6 +1361,11 @@ class BacktestEngine:
             scores = self._simulate_scores_at_date(date_str)
             if not scores:
                 continue
+
+            # 统计评分来源（用于报告透明度）
+            for sc in scores.values():
+                src = sc.get("score_source", "历史模拟")
+                self._score_source_stats[src] = self._score_source_stats.get(src, 0) + 1
 
             # 计算当前权重（排除现金管理ETF）
             total_val = self.portfolio.total_value
@@ -1897,6 +1923,7 @@ class BacktestEngine:
             "dividend_return": round(dividend_return, 2),
             "price_return": round(price_return, 2),
             "yearly_returns": yearly_returns,
+            "score_source_stats": dict(self._score_source_stats),
         }
 
         if verbose:
@@ -1911,8 +1938,18 @@ class BacktestEngine:
         print("=" * 70)
 
         # 评分数据来源提示
-        print(f"\n  ⚠️  评分数据来源: 历史分红数据模拟（无前视偏差）")
-        print(f"     股息率=当时已公告分红/历史价格, 国债收益率=年度插值近似")
+        score_stats = results.get("score_source_stats", {})
+        realtime_cnt = score_stats.get("实时评分", 0)
+        simulated_cnt = score_stats.get("历史模拟", 0)
+        total_score_cnt = realtime_cnt + simulated_cnt
+        if total_score_cnt > 0:
+            realtime_pct = realtime_cnt / total_score_cnt * 100
+            print(f"\n  ⚠️  评分数据来源: 历史分红数据模拟（无前视偏差）")
+            print(f"     股息率=当时已公告分红/历史价格, 国债收益率=年度插值近似")
+            print(f"     实时评分占比: {realtime_pct:.1f}%（{realtime_cnt:,} 条）/ 历史模拟: {100-realtime_pct:.1f}%（{simulated_cnt:,} 条）")
+        else:
+            print(f"\n  ⚠️  评分数据来源: 历史分红数据模拟（无前视偏差）")
+            print(f"     股息率=当时已公告分红/历史价格, 国债收益率=年度插值近似")
 
         print(f"\n  ── 收益指标 ──")
         print(f"  回测期间:     {results['period']}")
@@ -2017,12 +2054,33 @@ class BacktestEngine:
         nav_df = self.portfolio.get_nav_dataframe()
         trade_df = self.portfolio.get_trade_log()
 
+        # 评分来源统计
+        score_stats = results.get("score_source_stats", {})
+        realtime_cnt = score_stats.get("实时评分", 0)
+        simulated_cnt = score_stats.get("历史模拟", 0)
+        total_score_cnt = realtime_cnt + simulated_cnt
+        if total_score_cnt > 0 and realtime_cnt > 0:
+            realtime_pct = realtime_cnt / total_score_cnt * 100
+            score_src_line = (
+                f"历史分红数据模拟（{100-realtime_pct:.0f}%）+ 实时周报评分（{realtime_pct:.0f}%，{realtime_cnt:,} 条）"
+            )
+        else:
+            score_src_line = "历史分红数据模拟（无前视偏差），全程 100% 模拟评分"
+
+        # 股票池标注
+        universe_label = {
+            "default": "精选32只（dividend_evaluator.py）",
+            "csi500":  "中证500高股息84只（csi500_universe.py）",
+            "csi300":  "沪深300高股息97只（csi300_universe.py）",
+        }.get(getattr(self, "_universe", "default"), self._universe)
+
         lines = [
             f"# 📊 红利周期轮动策略 — 回测报告",
             f"\n> **回测期间**: {results['period']}  ",
             f"> **生成时间**: {now_str}  ",
             f"> **初始资金**: {results['initial_cash']:,.0f} 元  ",
-            f"> **评分数据来源**: 历史分红数据模拟（无前视偏差）  ",
+            f"> **股票池**: {universe_label}  ",
+            f"> **评分数据来源**: {score_src_line}  ",
             f"> **股息率计算**: 当时已公告分红÷历史价格，国债收益率按年度插值近似  \n",
             "---\n",
         ]
@@ -2259,4 +2317,5 @@ class BacktestEngine:
             snap_df.to_csv(holding_path, index=False, encoding="utf-8")
             print(f"  💾 持仓明细 → {holding_path}")
 
-        return content
+        report_path = output_dir / "backtest_report.md"
+        return str(report_path)
