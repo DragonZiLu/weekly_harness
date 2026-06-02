@@ -79,6 +79,12 @@ COMPANIES = {
         "中国电信": {"ts_code": "601728.SH", "category": "弱周期红利", "certainty": "A-",
                    "moat": "央企垄断·云业务", "comment": "云网融合转型，分红稳定"},
     },
+    "交通": {
+        "宁沪高速": {"ts_code": "600377.SH", "category": "弱周期红利", "certainty": "A",
+                   "moat": "垄断长三角核心路桥资产·黄金路段", "comment": "长三角最赚钱高速公路，连接沪宁核心经济带，车流量稳增"},
+        "山东高速": {"ts_code": "600350.SH", "category": "弱周期红利", "certainty": "A-",
+                   "moat": "垄断山东全省高速资产·特许经营权", "comment": "山东高速集团旗下路桥龙头，弱周期稳分红，全省路网垄断"},
+    },
     "银行": {
         "招商银行": {"ts_code": "600036.SH", "category": "弱周期红利", "certainty": "A",
                    "moat": "庞大优质客户资源·零售之王", "comment": "仅次于四大行，保守预估2%增速"},
@@ -639,6 +645,26 @@ FALLBACK_DATA = {
         "buyback_yield": 0.0, "revenue_growth": 5.0, "net_profit_growth": 42.2,
         "payout_ratio": 44.0, "total_mv": 1392.0,
         "note": "2025年报：净利144.1亿+42.2%，年报分红0.4元/股(无中期)，股息率4.51%；火电龙头，煤价下行利好利润弹性；tushare dv_ttm=3.04%含2024年报未含2025预案，自算更准"
+    },
+    "600350.SH": {  # 山东高速
+        # tushare实测(2026-06-02)：股价11.62元，PE=17.4x，PB=1.83，自算股息率=3.61%
+        # 2025年报：ROE=7.3%，净利润增速+0.3%
+        # road/toll highway stock, stable dividend
+        "close": 11.62, "pe_ttm": 17.4, "pb": 1.83,
+        "div_yield": 3.61, "roe": 7.3, "dps_latest": 0.42,
+        "buyback_yield": 0.0, "revenue_growth": 2.0, "net_profit_growth": 0.3,
+        "payout_ratio": 55.0, "total_mv": 562.0,
+        "note": "2026-06-02 tushare实测: 股价11.62元，PE=17.4x，自算股息率3.61%；山东路桥龙头，ROE偏低因重资产高折旧"
+    },
+    "600377.SH": {  # 宁沪高速
+        # tushare实测(2026-06-02)：股价12.93元，PE=13.7x，PB=1.50，自算股息率=3.79%
+        # 2025年报：ROE=11.5%，净利润增速-7.1%
+        # 长三角最赚钱的高速公路资产
+        "close": 12.93, "pe_ttm": 13.7, "pb": 1.50,
+        "div_yield": 3.79, "roe": 11.5, "dps_latest": 0.49,
+        "buyback_yield": 0.0, "revenue_growth": 2.0, "net_profit_growth": -7.1,
+        "payout_ratio": 60.0, "total_mv": 651.0,
+        "note": "2026-06-02 tushare实测: 股价12.93元，PE=13.7x，自算股息率3.79%；长三角黄金路段，ROE 11.5%为路桥中优质"
     },
     "600027.SH": {  # 华电国际
         # 2025年报：净利润60.7亿+1.4%，营收1260.1亿，ROE=8.89%
