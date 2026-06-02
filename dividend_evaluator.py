@@ -207,13 +207,69 @@ SECTOR_THRESHOLDS = {
         "watch": 3.5, "buy": 5.0, "add": 6.0, "full": 7.0, "reduce": 3.0,
         "comment": "高端白酒5%+可布局，6%+积极",
     },
-    "中药": {
+    "医药": {
         "watch": 3.5, "buy": 5.0, "add": 5.5, "full": 6.0, "reduce": 3.5,
         "comment": "百年品牌5%+可布局，6%+极佳",
     },
-    "矿业": {
+    "农业": {
+        "watch": 3.0, "buy": 4.5, "add": 5.5, "full": 6.5, "reduce": 2.5,
+        "comment": "猪周期底部高股息信号，4.5%+布局",
+    },
+    "食品饮料": {
+        "watch": 3.0, "buy": 4.0, "add": 5.0, "full": 6.0, "reduce": 2.5,
+        "comment": "消费龙头4%+可攒股，6%+黄金坑",
+    },
+    "汽车": {
+        "watch": 3.0, "buy": 4.0, "add": 5.0, "full": 6.0, "reduce": 2.5,
+        "comment": "汽车产业链4%+关注，6%+极佳",
+    },
+    "传媒": {
+        "watch": 3.0, "buy": 4.5, "add": 5.5, "full": 6.5, "reduce": 2.5,
+        "comment": "梯媒垄断，4.5%+建仓",
+    },
+    "服饰": {
+        "watch": 3.0, "buy": 4.0, "add": 5.0, "full": 6.0, "reduce": 2.5,
+        "comment": "代工龙头，高股息稀缺",
+    },
+    "IT设备": {
         "watch": 2.0, "buy": 3.0, "add": 3.5, "full": 4.0, "reduce": 1.5,
-        "comment": "周期+成长型矿业，3%安全边际线，3.5%+低估，4%+极佳买点",
+        "comment": "科技硬件3%安全线，3.5%+低估",
+    },
+    "钢铁": {
+        "watch": 2.0, "buy": 3.0, "add": 3.5, "full": 4.0, "reduce": 1.5,
+        "comment": "周期钢铁3%安全边际线，4%+极佳买点",
+    },
+    "建材": {
+        "watch": 2.0, "buy": 3.0, "add": 3.5, "full": 4.0, "reduce": 1.5,
+        "comment": "周期建材3%安全边际线，4%+极佳买点",
+    },
+    "化工": {
+        "watch": 2.0, "buy": 3.0, "add": 3.5, "full": 4.0, "reduce": 1.5,
+        "comment": "周期化工3%安全边际线，4%+极佳买点",
+    },
+    "有色": {
+        "watch": 2.0, "buy": 3.0, "add": 3.5, "full": 4.0, "reduce": 1.5,
+        "comment": "周期有色3%安全边际线，4%+极佳买点",
+    },
+    "交通": {
+        "watch": 3.5, "buy": 4.0, "add": 4.5, "full": 5.0, "reduce": 3.0,
+        "comment": "铁路/公路垄断资产，4%+攒股",
+    },
+    "建筑": {
+        "watch": 3.0, "buy": 4.0, "add": 5.0, "full": 6.0, "reduce": 2.5,
+        "comment": "基建龙头，4%+布局",
+    },
+    "工业": {
+        "watch": 2.5, "buy": 3.5, "add": 4.5, "full": 5.5, "reduce": 2.0,
+        "comment": "工业制造，3.5%+关注",
+    },
+    "非银金融": {
+        "watch": 3.0, "buy": 4.0, "add": 4.5, "full": 5.0, "reduce": 2.5,
+        "comment": "券商红利稀缺，4%+关注",
+    },
+    "燃气": {
+        "watch": 4.0, "buy": 5.0, "add": 6.0, "full": 7.0, "reduce": 3.5,
+        "comment": "城燃稳定分红，5%+布局",
     },
     "石油": {
         "watch": 4.0, "buy": 5.0, "add": 6.0, "full": 7.0, "reduce": 3.5,
@@ -258,12 +314,26 @@ SECTOR_LIFECYCLE = {
     "保险":   {"stage": "成熟",   "capex_trend": "无",   "dividend_potential": "中", "comment": "综合金融，分红稳定"},
     "家电":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "竞争格局稳定，龙头回购+分红"},
     "白酒":   {"stage": "成熟",   "capex_trend": "低",   "dividend_potential": "高", "comment": "品牌护城河，极低资本开支"},
-    "中药":   {"stage": "成熟",   "capex_trend": "低",   "dividend_potential": "中", "comment": "品牌溢价，分红率可提升"},
-    "矿业":   {"stage": "成长",   "capex_trend": "高",   "dividend_potential": "低", "comment": "扩产周期，资本开支大；待高峰后分红率可升至50%"},
+    "医药":   {"stage": "成熟",   "capex_trend": "低",   "dividend_potential": "中", "comment": "品牌溢价，分红率可提升"},
+    "农业":   {"stage": "周期",   "capex_trend": "波动", "dividend_potential": "中", "comment": "猪周期底部高分红信号"},
+    "汽车":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "汽车产业链龙头，分红稳定"},
+    "传媒":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "高", "comment": "梯媒垄断+轻资产，自由现金流好"},
+    "服饰":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中", "comment": "代工龙头高分红"},
+    "IT设备":{"stage": "成长",   "capex_trend": "高",   "dividend_potential": "低", "comment": "科技硬件资本开支大，分红率较低"},
+    "食品饮料":{"stage": "成熟", "capex_trend": "低",   "dividend_potential": "高", "comment": "消费品龙头，极低资本开支"},
     "石油":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "能源转型期，维持产量为主"},
     "煤炭":   {"stage": "夕阳转奶牛", "capex_trend": "下降", "dividend_potential": "极高", "comment": "资本开支结束→分红率70%+，典型夕阳→奶牛"},
     "火电":   {"stage": "转型",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "煤电转型期，电价市场化提升利润弹性"},
     "海运":   {"stage": "周期",   "capex_trend": "波动", "dividend_potential": "中", "comment": "全球集运周期，运价波动大，底部高分红"},
+    "钢铁":   {"stage": "周期",   "capex_trend": "下降", "dividend_potential": "中", "comment": "钢铁周期，资本开支下降→分红率提升"},
+    "建材":   {"stage": "周期",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "水泥建材龙头，分红率高"},
+    "化工":   {"stage": "成长",   "capex_trend": "高",   "dividend_potential": "低", "comment": "扩产周期，资本开支大；待高峰后分红率可升至50%"},
+    "有色":   {"stage": "周期",   "capex_trend": "稳定", "dividend_potential": "中", "comment": "铝加工，周期波动"},
+    "交通":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "铁路/公路垄断，收费稳定，分红可靠"},
+    "建筑":   {"stage": "成熟",   "capex_trend": "下降", "dividend_potential": "中高", "comment": "基建央企，去杠杆后分红率提升"},
+    "工业":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中", "comment": "工业制造龙头，分红稳定"},
+    "非银金融":{"stage": "周期",  "capex_trend": "无",   "dividend_potential": "中", "comment": "券商，经营周期性但轻资产"},
+    "燃气":   {"stage": "成熟",   "capex_trend": "稳定", "dividend_potential": "中高", "comment": "城燃特许经营，现金流稳定"},
 
     "ETF":   {"stage": "N/A",    "capex_trend": "N/A",  "dividend_potential": "N/A", "comment": "被动投资"},
 }

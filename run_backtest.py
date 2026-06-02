@@ -64,6 +64,10 @@ def run_backtest(args):
         periodic_injection=args.injection,
         injection_until=args.injection_until,
         use_forward_yield=args.forward,
+        universe=args.universe,
+        dyn_min_roe=args.dyn_min_roe,
+        dyn_min_roe_years=args.dyn_min_roe_years,
+        dyn_vol_certainty=args.dyn_vol_certainty,
     )
 
     start_time = time.time()
@@ -77,7 +81,26 @@ def run_backtest(args):
 
     # 生成报告
     if "error" not in results:
-        engine.generate_backtest_report(results)
+        # 根据 universe 和 ROE 约束自动确定输出目录
+        from pathlib import Path
+        universe = args.universe
+        if universe in ("dyn_csi300", "dyn_csi500"):
+            roe_tag = f"_roe{int(args.dyn_min_roe)}y{args.dyn_min_roe_years}" if args.dyn_min_roe > 0 and args.dyn_min_roe_years > 0 else ""
+            vol_tag = "_volcert" if args.dyn_vol_certainty else ""
+            label_map = {"dyn_csi300": "沪深300高股息动态", "dyn_csi500": "中证500高股息动态"}
+            folder = label_map.get(universe, universe) + roe_tag + vol_tag
+        else:
+            folder_map = {
+                "default":    "精选32",
+                "csi300":     "沪深300高股息97",
+                "csi500":     "中证500高股息84",
+                "dyn_csi300": "沪深300高股息动态",
+                "dyn_csi500": "中证500高股息动态",
+            }
+            folder = folder_map.get(universe, universe)
+        out_dir = Path(__file__).parent / "data" / "backtest" / folder
+        engine.generate_backtest_report(results, output_dir=out_dir)
+        print(f"  报告已保存至: {out_dir}")
 
     print(f"\n  ⏱️  回测耗时: {elapsed:.1f} 秒")
     print("=" * 70)
@@ -183,6 +206,18 @@ def main():
     # 交易参数
     parser.add_argument("--commission", type=float, default=0.1, help="交易费率%% (默认: 0.1)")
     parser.add_argument("--slippage", type=float, default=0.1, help="滑点%% (默认: 0.1)")
+
+    # 股票池
+    parser.add_argument("--universe", default="default",
+                        choices=["default", "csi300", "csi500", "dyn_csi300", "dyn_csi500"],
+                        help="股票池: default=精选32 | csi300=静态沪深300 | csi500=静态中证500 | "
+                             "dyn_csi300=动态沪深300 | dyn_csi500=动态中证500 (默认: default)")
+    parser.add_argument("--dyn-min-roe", type=float, default=0.0,
+                        help="动态宇宙ROE约束阈值%%（0=不过滤，建议8.0）(默认: 0)")
+    parser.add_argument("--dyn-min-roe-years", type=int, default=0,
+                        help="ROE连续达标年数（0=不过滤，建议3）(默认: 0)")
+    parser.add_argument("--dyn-vol-certainty", action="store_true", default=False,
+                        help="动态宇宙：用历史波动率推算certainty（低波→AA，高波→B），替代固定B+")
 
     # 模式
     parser.add_argument("--plan-only", action="store_true", help="仅生成当周调仓计划（不回测）")

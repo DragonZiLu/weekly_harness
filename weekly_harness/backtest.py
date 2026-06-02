@@ -525,6 +525,9 @@ class BacktestEngine:
         injection_until: Optional[str] = None,
         use_forward_yield: bool = False,
         universe: str = "default",  # "default"=精选32 | "csi500"=中证500高股息84只 | "csi300"=沪深300高股息97只
+        dyn_min_roe: float = 0.0,       # 动态宇宙 ROE 约束（0=不过滤）
+        dyn_min_roe_years: int = 0,     # ROE 连续达标年数（0=不过滤）
+        dyn_vol_certainty: bool = False, # 是否用历史波动率动态计算 certainty（低波→AA, 高波→B）
     ):
         self.strategy = DividendCycleStrategy(strategy_params)
         self.portfolio = Portfolio(
@@ -542,6 +545,9 @@ class BacktestEngine:
         self.total_invested = initial_cash  # 累计投入（含追加），用于正确计算收益率
         self.use_forward_yield = use_forward_yield  # True=用预期股息率评分，False=用历史股息率
         self._universe = universe  # 股票池选择
+        self._dyn_min_roe = dyn_min_roe            # ROE 阈值（仅动态宇宙）
+        self._dyn_min_roe_years = dyn_min_roe_years
+        self._dyn_vol_certainty = dyn_vol_certainty  # 波动率→certainty 动态映射  # ROE 连续年数（仅动态宇宙）
 
         # 股票元数据
         self._stock_meta: Dict[str, Dict] = {}
@@ -566,7 +572,10 @@ class BacktestEngine:
 
         universe 参数控制使用哪个股票池：
           - "default"  : 使用 dividend_evaluator.py 中精选32只标的（默认）
-          - "csi500"   : 使用 csi500_universe.py 中证500高股息84只标的
+          - "csi500"   : 使用 csi500_universe.py 中证500高股息84只标的（静态）
+          - "csi300"   : 使用 csi300_universe.py 沪深300高股息97只标的（静态）
+          - "dyn_csi300" : 动态沪深300 — 每季度按实际成分+当时股息率筛选
+          - "dyn_csi500" : 动态中证500 — 每季度按实际成分+当时股息率筛选
         """
         import sys
         sys.path.insert(0, str(_PROJECT_ROOT))
@@ -581,6 +590,13 @@ class BacktestEngine:
             from csi300_universe import get_csi300_stock_meta
             for ts_code, meta in get_csi300_stock_meta().items():
                 self._stock_meta[ts_code] = meta
+        elif universe in ("dyn_csi300", "dyn_csi500"):
+            # 动态模式：元数据在每次调仓时实时更新，此处仅初始化 DynamicIndexUniverse
+            index_code = "000300.SH" if universe == "dyn_csi300" else "000905.SH"
+            from weekly_harness.index_universe import DynamicIndexUniverse
+            self._dyn_universe = DynamicIndexUniverse(index_code)
+            self._dyn_universe.preload_weights()
+            # 初始时 _stock_meta 为空（仅含现金管理ETF），调仓循环中动态补充
         else:
             from dividend_evaluator import COMPANIES
             for sector, companies in COMPANIES.items():
@@ -590,7 +606,7 @@ class BacktestEngine:
                         "name": name,
                         "category": meta["category"],
                         "certainty": meta.get("certainty", ""),
-                        "sector": sector,
+                        "sector": meta.get("sector", sector),  # 优先用meta中的sector → 保留原始行业名
                         "is_etf": meta["category"] == "ETF红利",
                     }
 
@@ -604,7 +620,11 @@ class BacktestEngine:
         }
 
     def _fetch_all_prices(self, start_date: str, end_date: str):
-        """预获取所有标的价格数据"""
+        """预获取所有标的价格数据（仅用于静态股票池；动态模式跳过）"""
+        if getattr(self, "_universe", "default") in ("dyn_csi300", "dyn_csi500"):
+            # 动态模式：按需加载，不做全量预获取
+            print("\n  📥 动态宇宙模式：价格数据将在调仓时按需拉取")
+            return
         print("\n  📥 预获取历史价格数据...")
         for ts_code, meta in self._stock_meta.items():
             print(f"    {meta['name']} ({ts_code})...", end=" ")
@@ -624,7 +644,10 @@ class BacktestEngine:
                 print("⚠️ 无数据")
 
     def _fetch_all_dividends(self, start_date: str, end_date: str):
-        """预获取所有标的分红数据"""
+        """预获取所有标的分红数据（仅用于静态股票池；动态模式跳过）"""
+        if getattr(self, "_universe", "default") in ("dyn_csi300", "dyn_csi500"):
+            print("\n  💰 动态宇宙模式：分红数据将在调仓时按需拉取")
+            return
         print("\n  💰 预获取历史分红数据...")
         for ts_code, meta in self._stock_meta.items():
             df = self.fetcher.fetch_dividend_data(
@@ -689,6 +712,73 @@ class BacktestEngine:
                                 shares=eligible_shares,
                             )
                         self._processed_dividends.add(div_key)
+
+    def _ensure_price_and_dividend(self, ts_code: str, meta: Dict, backtest_start: str, backtest_end: str):
+        """懒加载：若 ts_code 尚未有价格/分红数据，立即拉取"""
+        if ts_code not in self._price_data:
+            use_nav = meta.get("category") == "现金管理"
+            df = self.fetcher.fetch_price_data(
+                ts_code=ts_code,
+                start_date=backtest_start,
+                end_date=backtest_end,
+                is_etf=meta.get("is_etf", False),
+                use_fund_nav=use_nav,
+            )
+            if not df.empty:
+                self._price_data[ts_code] = df
+
+        if ts_code not in self._dividend_data and meta.get("category") != "现金管理":
+            div_df = self.fetcher.fetch_dividend_data(
+                ts_code=ts_code,
+                start_date=backtest_start,
+                end_date=backtest_end,
+                is_etf=meta.get("is_etf", False),
+            )
+            if not div_df.empty:
+                self._dividend_data[ts_code] = div_df
+
+    def _update_dynamic_universe(self, date_str: str, backtest_start: str, backtest_end: str):
+        """
+        动态宇宙模式：
+        1. 查询 date_str 时指数的实际成分股
+        2. 获取当时 daily_basic，过滤 dv_ttm >= 3%
+        3. 若配置了 ROE 约束（_dyn_min_roe/_dyn_min_roe_years），额外过滤
+        4. 新增标的 → 补充 _stock_meta，懒加载价格/分红
+        5. 已持仓但不再满足条件的标的仍保留（等策略自然减仓）
+        """
+        dyn: "DynamicIndexUniverse" = self._dyn_universe  # type: ignore
+        new_meta = dyn.get_eligible_meta(
+            date_str=date_str,
+            min_div_yield=3.0,
+            min_roe=getattr(self, "_dyn_min_roe", 0.0),
+            min_roe_years=getattr(self, "_dyn_min_roe_years", 0),
+            vol_certainty=getattr(self, "_dyn_vol_certainty", False),
+        )
+
+        added = []
+        for ts_code, meta in new_meta.items():
+            if ts_code not in self._stock_meta:
+                self._stock_meta[ts_code] = meta
+                added.append(ts_code)
+
+        # 懒加载新增标的的价格+分红
+        for ts_code in added:
+            self._ensure_price_and_dividend(
+                ts_code, self._stock_meta[ts_code], backtest_start, backtest_end
+            )
+
+        # 确保现金管理ETF始终在池中
+        if self.CASH_ETF_CODE not in self._stock_meta:
+            self._stock_meta[self.CASH_ETF_CODE] = {
+                "name": self.CASH_ETF_NAME,
+                "category": "现金管理",
+                "certainty": "",
+                "sector": "货币",
+                "is_etf": True,
+            }
+            self._ensure_price_and_dividend(
+                self.CASH_ETF_CODE, self._stock_meta[self.CASH_ETF_CODE], backtest_start, backtest_end
+            )
 
     def _get_price_on_date(self, ts_code: str, date_str: str) -> Optional[float]:
         """获取某只股票在指定日期的收盘价（如非交易日取最近的前一交易日）"""
@@ -991,8 +1081,14 @@ class BacktestEngine:
             # ── 预期股息率（基于行业增速推算 forward_dps）──
             sector_growth_map = {
                 "水电": 3.0, "运营商": 5.0, "银行": 4.0, "保险": 6.0,
-                "家电": 8.0, "白酒": 12.0, "中药": 8.0, "矿业": 15.0,
-                "石油": 5.0, "煤炭": -2.0, "火电": 8.0, "海运": -20.0, "ETF": 5.0,
+                "交通": 3.0, "火电": 8.0, "燃气": 5.0,
+                "建筑": 3.0, "工业": 5.0, "非银金融": 5.0,
+                "家电": 8.0, "白酒": 12.0, "医药": 8.0, "农业": 5.0,
+                "汽车": 5.0, "传媒": 5.0, "服饰": 5.0, "IT设备": 8.0,
+                "食品饮料": 8.0,
+                "石油": 5.0, "煤炭": -2.0, "海运": -20.0,
+                "钢铁": 5.0, "建材": 5.0, "化工": 10.0, "有色": 8.0,
+                "ETF": 5.0,
             }
             growth = sector_growth_map.get(sector, 5.0)
             forward_dps = trailing_dps * (1 + growth / 100)
@@ -1283,6 +1379,8 @@ class BacktestEngine:
         self._dividend_data = {}
         self._stock_meta = {}
         self.total_invested = self.portfolio.initial_cash
+        self._backtest_start = start_date  # 动态模式懒加载需要
+        self._backtest_end   = end_date
 
         # ── 评分来源统计（用于报告透明度） ──
         self._score_source_stats: Dict[str, int] = {"实时评分": 0, "历史模拟": 0}
@@ -1336,6 +1434,14 @@ class BacktestEngine:
                 if can_inject:
                     self.portfolio.cash += self.periodic_injection
                     self.total_invested += self.periodic_injection
+
+            # ── 动态宇宙模式：每个调仓日更新成分股元数据 ──
+            if getattr(self, "_universe", "default") in ("dyn_csi300", "dyn_csi500"):
+                self._update_dynamic_universe(
+                    date_str,
+                    self._backtest_start,
+                    self._backtest_end,
+                )
 
             # 获取当前价格
             prices = {}
@@ -1628,7 +1734,7 @@ class BacktestEngine:
                 )
 
             # 卖出标的是否在后续上涨？（事后视角的反思）
-            sell_names = [t["name"] for t in sells]
+            sell_names = [str(t["name"]) for t in sells]
             if sell_names and total_ret < 0:
                 key_insights.append(
                     f"本年卖出标的：{', '.join(sell_names)}。在亏损年份卖出可能是止损，"
@@ -2068,10 +2174,17 @@ class BacktestEngine:
             score_src_line = "历史分红数据模拟（无前视偏差），全程 100% 模拟评分"
 
         # 股票池标注
+        roe_suffix = ""
+        if getattr(self, "_dyn_min_roe", 0) > 0 and getattr(self, "_dyn_min_roe_years", 0) > 0:
+            roe_suffix = f"，叠加ROE≥{self._dyn_min_roe}%连续{self._dyn_min_roe_years}年"
+        if getattr(self, "_dyn_vol_certainty", False):
+            roe_suffix += "，低波确定性映射"
         universe_label = {
-            "default": "精选32只（dividend_evaluator.py）",
-            "csi500":  "中证500高股息84只（csi500_universe.py）",
-            "csi300":  "沪深300高股息97只（csi300_universe.py）",
+            "default":   "精选32只（dividend_evaluator.py）",
+            "csi500":    "中证500高股息84只（静态，csi500_universe.py）",
+            "csi300":    "沪深300高股息97只（静态，csi300_universe.py）",
+            "dyn_csi300": f"沪深300高股息（动态：每季度按实际成分+当时dv_ttm≥3%筛选{roe_suffix}）",
+            "dyn_csi500": f"中证500高股息（动态：每季度按实际成分+当时dv_ttm≥3%筛选{roe_suffix}）",
         }.get(getattr(self, "_universe", "default"), self._universe)
 
         lines = [

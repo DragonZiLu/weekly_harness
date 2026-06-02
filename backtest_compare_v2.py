@@ -90,7 +90,9 @@ def build_classified_pool(index_code, index_name):
         cat = classify_stock(industry)
         pool[cat][name] = {
             'ts_code': code, 'category': cat,
-            'certainty': 'B', 'moat': '', 'comment': f'[{index_name}] {industry}'
+            'certainty': 'B', 'moat': '',
+            'sector': industry,  # 保留原始行业名 → SECTOR_THRESHOLDS 精准匹配
+            'comment': f'[{index_name}] {industry}'
         }
         cat_counts[cat] += 1
     
@@ -120,6 +122,24 @@ def run_one(pool_dict, label, out_dir_path):
         return results
     finally:
         dividend_evaluator.COMPANIES = original_companies
+
+def run_dynamic(label, out_dir_path, index_code='000905.SH'):
+    """动态模式：每季度按当时指数成分 + dv_ttm≥3% 筛选"""
+    params = StrategyParams()
+    params.max_positions = 15
+    engine = BacktestEngine(
+        strategy_params=params, initial_cash=100_0000,
+        commission_rate=0.001, slippage=0.001,
+        rebalance_freq='quarterly', use_forward_yield=False,
+    )
+    engine._universe = 'dyn_csi500' if index_code == '000905.SH' else 'dyn_csi300'
+    results = engine.run(start_date='2015-01-01', end_date='2026-05-30',
+                       benchmark_code='000300.SH', verbose=False)
+    
+    out_dir = Path(out_dir_path)
+    engine.generate_backtest_report(results, output_dir=out_dir)
+    print(f'    ✅ {label} (动态)')
+    return results
 
 def extract_metrics(path):
     m = {}
