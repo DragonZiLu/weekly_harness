@@ -112,6 +112,10 @@ COMPANIES = {
         "格力电器": {"ts_code": "000651.SZ", "category": "消费成长红利", "certainty": "B+",
                    "moat": "空调技术领先·高分红传统", "comment": "分红率高，回购力度增加"},
     },
+    "汽车": {
+        "宇通客车": {"ts_code": "600066.SH", "category": "消费成长红利", "certainty": "A-",
+                   "moat": "中国客车龙头·全球市占率第一·新能源领先", "comment": "客车行业绝对龙头，ROE 38%+股息率7.7%，全球市占率超15%"},
+    },
     "白酒": {
         "贵州茅台": {"ts_code": "600519.SH", "category": "消费成长红利", "certainty": "A",
                    "moat": "国酒品牌·定价权·超强护城河", "comment": "A股股王，品牌壁垒极高，分红率持续提升"},
@@ -655,6 +659,16 @@ FALLBACK_DATA = {
         "buyback_yield": 0.0, "revenue_growth": 2.0, "net_profit_growth": 0.3,
         "payout_ratio": 55.0, "total_mv": 562.0,
         "note": "2026-06-02 tushare实测: 股价11.62元，PE=17.4x，自算股息率3.61%；山东路桥龙头，ROE偏低因重资产高折旧"
+    },
+    "600066.SH": {  # 宇通客车
+        # tushare实测(2026-06-02)：股价32.67元，PE=13.3x，PB=6.13，自算股息率=7.65%
+        # 2025年报：ROE=38.3%，净利润增速+34.9%
+        # 中国客车行业绝对龙头，全球市占率超15%，新能源客车领先
+        "close": 32.67, "pe_ttm": 13.3, "pb": 6.13,
+        "div_yield": 7.65, "roe": 38.3, "dps_latest": 2.50,
+        "buyback_yield": 0.0, "revenue_growth": 25.0, "net_profit_growth": 34.9,
+        "payout_ratio": 60.0, "total_mv": 723.0,
+        "note": "2026-06-02 tushare实测: 股价32.67元，PE=13.3x，自算股息率7.65%；ROE 38.3%极优质，股息率超汽车满仓线6%"
     },
     "600377.SH": {  # 宁沪高速
         # tushare实测(2026-06-02)：股价12.93元，PE=13.7x，PB=1.50，自算股息率=3.79%
