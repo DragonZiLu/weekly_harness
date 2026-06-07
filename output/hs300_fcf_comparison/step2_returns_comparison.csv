@@ -1,4 +1,0 @@
-version,label,nav_final,total_ret_pct,annual_ret_pct,idx_932366_total_ret_pct,idx_932366_annual_ret_pct,hs300_total_ret_pct,hs300_annual_ret_pct,excess_total_pct,excess_annual_pct,tracking_error_pct,info_ratio,n_periods,n_years
-A,原始宽松(circ_mv+无TTM+宽松OCF),3.9388,293.88,14.69,169.86,10.44,59.95,4.81,124.02,4.26,5.72,0.74,40,10.0
-B,fixed+宽松(total_mv+TTM+宽松OCF),3.8264,282.64,14.36,169.86,10.44,59.95,4.81,112.78,3.92,3.1,1.27,40,10.0
-C,fixed+严格(total_mv+TTM+严格OCF),2.7978,179.78,10.84,169.86,10.44,59.95,4.81,9.92,0.4,7.97,0.05,40,10.0

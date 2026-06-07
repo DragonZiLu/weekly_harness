@@ -3,13 +3,14 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
-data/weekly_reports/
-data/weekly_history.csv
-data/weekly_history.csv.tmp
-data/dividend_report.md
-data/dividend_chart.png
-data/backtest/
-data/portfolio_state.json
 logs/
 *.egg-info/
 *.tmp
+
+# Data directories - do NOT upload to git
+data/
+cache/
+output/
+
+# Docs output (generated reports, keep source only if needed)
+# docs/ are kept - they are versioned reports
