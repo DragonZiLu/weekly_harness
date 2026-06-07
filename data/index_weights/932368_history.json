@@ -1,0 +1,406 @@
+{
+  "20241231": [
+    {
+      "con_code": "600938.SH",
+      "weight": 10.68
+    },
+    {
+      "con_code": "601857.SH",
+      "weight": 10.455
+    },
+    {
+      "con_code": "000333.SZ",
+      "weight": 10.14
+    },
+    {
+      "con_code": "601088.SH",
+      "weight": 10.086
+    },
+    {
+      "con_code": "000858.SZ",
+      "weight": 7.76
+    },
+    {
+      "con_code": "601919.SH",
+      "weight": 6.228
+    },
+    {
+      "con_code": "601225.SH",
+      "weight": 5.023
+    },
+    {
+      "con_code": "601600.SH",
+      "weight": 3.516
+    },
+    {
+      "con_code": "601633.SH",
+      "weight": 3.342
+    },
+    {
+      "con_code": "601898.SH",
+      "weight": 3.006
+    },
+    {
+      "con_code": "600887.SH",
+      "weight": 2.765
+    },
+    {
+      "con_code": "600482.SH",
+      "weight": 1.89
+    },
+    {
+      "con_code": "002311.SZ",
+      "weight": 1.504
+    },
+    {
+      "con_code": "600096.SH",
+      "weight": 1.478
+    },
+    {
+      "con_code": "600585.SH",
+      "weight": 1.226
+    },
+    {
+      "con_code": "000792.SZ",
+      "weight": 1.168
+    },
+    {
+      "con_code": "600612.SH",
+      "weight": 1.158
+    },
+    {
+      "con_code": "000807.SZ",
+      "weight": 1.052
+    },
+    {
+      "con_code": "000921.SZ",
+      "weight": 1.031
+    },
+    {
+      "con_code": "601168.SH",
+      "weight": 0.945
+    },
+    {
+      "con_code": "600157.SH",
+      "weight": 0.911
+    },
+    {
+      "con_code": "000983.SZ",
+      "weight": 0.884
+    },
+    {
+      "con_code": "600517.SH",
+      "weight": 0.864
+    },
+    {
+      "con_code": "000786.SZ",
+      "weight": 0.801
+    },
+    {
+      "con_code": "603939.SH",
+      "weight": 0.76
+    },
+    {
+      "con_code": "601001.SH",
+      "weight": 0.697
+    },
+    {
+      "con_code": "601156.SH",
+      "weight": 0.643
+    },
+    {
+      "con_code": "600295.SH",
+      "weight": 0.601
+    },
+    {
+      "con_code": "600754.SH",
+      "weight": 0.594
+    },
+    {
+      "con_code": "600219.SH",
+      "weight": 0.594
+    },
+    {
+      "con_code": "600863.SH",
+      "weight": 0.589
+    },
+    {
+      "con_code": "601958.SH",
+      "weight": 0.562
+    },
+    {
+      "con_code": "601880.SH",
+      "weight": 0.527
+    },
+    {
+      "con_code": "600380.SH",
+      "weight": 0.497
+    },
+    {
+      "con_code": "002120.SZ",
+      "weight": 0.493
+    },
+    {
+      "con_code": "689009.SH",
+      "weight": 0.478
+    },
+    {
+      "con_code": "600258.SH",
+      "weight": 0.475
+    },
+    {
+      "con_code": "000513.SZ",
+      "weight": 0.461
+    },
+    {
+      "con_code": "600873.SH",
+      "weight": 0.436
+    },
+    {
+      "con_code": "603156.SH",
+      "weight": 0.43
+    },
+    {
+      "con_code": "600312.SH",
+      "weight": 0.415
+    },
+    {
+      "con_code": "603899.SH",
+      "weight": 0.403
+    },
+    {
+      "con_code": "603056.SH",
+      "weight": 0.371
+    },
+    {
+      "con_code": "601000.SH",
+      "weight": 0.352
+    },
+    {
+      "con_code": "600535.SH",
+      "weight": 0.35
+    },
+    {
+      "con_code": "603129.SH",
+      "weight": 0.348
+    },
+    {
+      "con_code": "603688.SH",
+      "weight": 0.288
+    },
+    {
+      "con_code": "603883.SH",
+      "weight": 0.277
+    },
+    {
+      "con_code": "300002.SZ",
+      "weight": 0.252
+    },
+    {
+      "con_code": "603444.SH",
+      "weight": 0.198
+    }
+  ],
+  "20250630": [
+    {
+      "con_code": "600938.SH",
+      "weight": 9.869
+    },
+    {
+      "con_code": "601919.SH",
+      "weight": 8.321
+    },
+    {
+      "con_code": "000858.SZ",
+      "weight": 8.029
+    },
+    {
+      "con_code": "000651.SZ",
+      "weight": 7.407
+    },
+    {
+      "con_code": "002714.SZ",
+      "weight": 5.236
+    },
+    {
+      "con_code": "603993.SH",
+      "weight": 4.98
+    },
+    {
+      "con_code": "601225.SH",
+      "weight": 4.481
+    },
+    {
+      "con_code": "002352.SZ",
+      "weight": 4.433
+    },
+    {
+      "con_code": "601600.SH",
+      "weight": 4.401
+    },
+    {
+      "con_code": "601877.SH",
+      "weight": 2.969
+    },
+    {
+      "con_code": "000568.SZ",
+      "weight": 2.947
+    },
+    {
+      "con_code": "600482.SH",
+      "weight": 2.626
+    },
+    {
+      "con_code": "000039.SZ",
+      "weight": 2.248
+    },
+    {
+      "con_code": "300498.SZ",
+      "weight": 2.091
+    },
+    {
+      "con_code": "600352.SH",
+      "weight": 2.048
+    },
+    {
+      "con_code": "000708.SZ",
+      "weight": 1.998
+    },
+    {
+      "con_code": "600096.SH",
+      "weight": 1.61
+    },
+    {
+      "con_code": "603885.SH",
+      "weight": 1.41
+    },
+    {
+      "con_code": "600585.SH",
+      "weight": 1.377
+    },
+    {
+      "con_code": "000807.SZ",
+      "weight": 1.337
+    },
+    {
+      "con_code": "000792.SZ",
+      "weight": 1.261
+    },
+    {
+      "con_code": "601168.SH",
+      "weight": 1.23
+    },
+    {
+      "con_code": "002001.SZ",
+      "weight": 1.208
+    },
+    {
+      "con_code": "000933.SZ",
+      "weight": 1.142
+    },
+    {
+      "con_code": "601212.SH",
+      "weight": 1.042
+    },
+    {
+      "con_code": "603833.SH",
+      "weight": 1.017
+    },
+    {
+      "con_code": "600219.SH",
+      "weight": 0.96
+    },
+    {
+      "con_code": "300803.SZ",
+      "weight": 0.869
+    },
+    {
+      "con_code": "600066.SH",
+      "weight": 0.843
+    },
+    {
+      "con_code": "601880.SH",
+      "weight": 0.787
+    },
+    {
+      "con_code": "600968.SH",
+      "weight": 0.739
+    },
+    {
+      "con_code": "002532.SZ",
+      "weight": 0.732
+    },
+    {
+      "con_code": "603939.SH",
+      "weight": 0.701
+    },
+    {
+      "con_code": "300724.SZ",
+      "weight": 0.674
+    },
+    {
+      "con_code": "600295.SH",
+      "weight": 0.624
+    },
+    {
+      "con_code": "603129.SH",
+      "weight": 0.622
+    },
+    {
+      "con_code": "600873.SH",
+      "weight": 0.532
+    },
+    {
+      "con_code": "600258.SH",
+      "weight": 0.509
+    },
+    {
+      "con_code": "002120.SZ",
+      "weight": 0.479
+    },
+    {
+      "con_code": "601231.SH",
+      "weight": 0.477
+    },
+    {
+      "con_code": "002056.SZ",
+      "weight": 0.435
+    },
+    {
+      "con_code": "600380.SH",
+      "weight": 0.432
+    },
+    {
+      "con_code": "000426.SZ",
+      "weight": 0.422
+    },
+    {
+      "con_code": "603233.SH",
+      "weight": 0.413
+    },
+    {
+      "con_code": "000513.SZ",
+      "weight": 0.394
+    },
+    {
+      "con_code": "600312.SH",
+      "weight": 0.39
+    },
+    {
+      "con_code": "603816.SH",
+      "weight": 0.386
+    },
+    {
+      "con_code": "601156.SH",
+      "weight": 0.305
+    },
+    {
+      "con_code": "300073.SZ",
+      "weight": 0.296
+    },
+    {
+      "con_code": "300002.SZ",
+      "weight": 0.262
+    }
+  ]
+}

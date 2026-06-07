@@ -1,0 +1,21 @@
+calc_config:
+  5yr_ocf_check: true
+  buffer_zone: null
+  capex_field: c_pay_acq_const_fiolta
+  ev_mv_field: total_mv
+  ocf_mode: lenient
+  pq_base: all
+  pq_cutoff_percentile: 20
+  use_ttm: false
+created: '2026-06-06T09:32:58.100352'
+data_version:
+  daily_basic: 45_rebalance_dates_2015_2026
+  financials: 2011_2025_annual + 2023Q1_2025Q3_quarterly
+  index_weights: 932366/932368_202412_202603
+description: ZZ800 B版（fixed+宽松）total_mv+TTM
+experiment_id: zz800_fcf_b_lenient
+strategy:
+  index_code: 000906.SH
+  top_n: 50
+  universe_size: 800
+  weight_cap: 0.1

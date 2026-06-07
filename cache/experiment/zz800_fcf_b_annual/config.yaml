@@ -1,0 +1,11 @@
+calc_config:
+  ev_mv_field: total_mv
+  ocf_mode: lenient
+  pq_base: all
+  use_ttm: false
+created: '2026-06-06T10:34:21.021713'
+description: ZZ800 B版年报口径（use_ttm=False）
+experiment_id: zz800_fcf_b_annual
+strategy:
+  index_code: 000906.SH
+  top_n: 50
