@@ -1,0 +1,53 @@
+# ══════════════════════════════════════════════════════════════════
+# H版策略：FCF绝对值排序 + Top50
+# ══════════════════════════════════════════════════════════════════
+# 核心改动：从 B版(FCF收益率=FCF/EV排序) 改为 FCF绝对值排序
+# 其他参数与B版完全一致(无缓冲区、Top50、FCF加权10%封顶)
+
+name: "ZZ800 FCF Top50 by FCF Absolute Value"
+code: "zz800_fcf_top_by_fcf"
+version: "H"
+description: "在B版基础上，排序指标从FCF收益率(FCF/EV)改为FCF绝对值。选FCF最大的50只公司，而非FCF收益率最高的50只。"
+
+# ── 指数样本空间 ──
+index_code: "000906.SH"
+index_name: "中证800"
+
+# ── 选股参数 ──
+selection:
+  sort_by: "fcf"           # H版核心改动：按FCF绝对值排序(而非fcf_yield=FCF/EV)
+  sort_ascending: false    # 降序：FCF大的排前面
+  top_n: 50                # 固定选50只
+  
+  # 缓冲区：无(与B版一致)
+  buffer:
+    enabled: false
+    ratio: 0               # ±0% = 无缓冲区
+
+# ── 加权参数 ──
+weighting:
+  method: "fcf_absolute"   # FCF绝对值加权
+  cap_pct: 10              # 单只上限10%，超限部分迭代重分配
+
+# ── 筛选参数(与B版一致) ──
+filtering:
+  exclude_industries: ["银行","保险","证券","房地产","房地产服务"]
+  fcf_positive: true       # FCF > 0
+  profit_quality:
+    enabled: true
+    cutoff: "median_minus_0.05"  # 全样本中位数-0.05
+  ocf_5yr:
+    enabled: true
+    strict: false           # 宽松模式：缺失年份跳过
+    window: 5               # 5年窗口
+  ev_positive: true         # EV > 0
+
+# ── 数据口径(与B版一致) ──
+data:
+  use_ttm: true
+  ev_method: "total_mv + total_liab - money_cap"
+
+# ── 调仓 ──
+rebalance:
+  frequency: "quarterly"   # 季度调仓
+  dates: "auto"            # 自动生成每月第二个周一后的周五

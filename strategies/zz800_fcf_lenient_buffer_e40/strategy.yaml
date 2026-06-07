@@ -1,0 +1,121 @@
+# 中证800自由现金流策略 — E版 (D版 + 缓冲区扩大至 ±40%)
+# 与D版唯一差异: buffer_ratio 0.20 → 0.40
+name: zz800_fcf_lenient_buffer_e40
+version: "E"
+baseline: false
+parent: "zz800_fcf_lenient_buffer"           # 基于D版
+description: |
+  中证800自由现金流选股策略 — E版 (D版扩大缓冲区)
+  与D版唯一差异: 缓冲区比例从±20%扩大至±40%，进一步降低换手率
+  选样: FCF率(FCF/EV)降序 → 缓冲区规则(±40%) → 50只
+  加权: 自由现金流(FCF绝对值)加权 + 10%封顶迭代重分配 (同D版)
+  版本对比:
+    D版:  total_mv + TTM + 宽松OCF + 缓冲区±20% + Top50
+    E版:  total_mv + TTM + 宽松OCF + 缓冲区±40% + Top50 → 更低换手率
+  缓冲区说明(E版):
+    前30名(top_n×60%): 必选入
+    第31~70名(top_n×140%): 缓冲区，老成分股优先保留
+    第71名起: 必剔除
+# ──────────────────────────────────────
+# 样本空间 (同D版)
+# ──────────────────────────────────────
+universe:
+  index_code: "000906.SH"
+  index_name: "中证800"
+# ──────────────────────────────────────
+# 选股规则 (核心变更: 缓冲区±40%)
+# ──────────────────────────────────────
+selection:
+  top_n: 50
+  use_ttm: true
+  skip_turnover_filter: true
+  buffer_zone:
+    enabled: true
+    buffer_ratio: 0.40           # ★ ±40% (D版为±20%)
+    description: |
+      排名 ≤ 30 → 必选入  (top_n × 60%)
+      排名 31~70 → 缓冲区: 老成分股优先保留  (top_n × 140%)
+      排名 > 70 → 必剔除
+# ──────────────────────────────────────
+# 行业过滤 (同D版)
+# ──────────────────────────────────────
+industry_filter:
+  method: "shenwan_plus_keywords"
+  excluded_industries:
+    - "银行"
+    - "证券"
+    - "保险"
+    - "多元金融"
+    - "房地产开发"
+    - "房地产服务"
+  excluded_keywords:
+    - "金融"
+    - "银行"
+    - "证券"
+    - "保险"
+    - "地产"
+    - "房产"
+# ──────────────────────────────────────
+# FCF计算 (同D版)
+# ──────────────────────────────────────
+fcf:
+  capex_field: "c_pay_acq_const_fiolta"
+  capex_scope: "固定资产+无形资产+其他长期资产"
+  ttm_ref_periods:
+    "03": "0930"
+    "06": "0331"
+    "09": "0630"
+    "12": "0930"
+  ev_market_cap: "total_mv"
+  ocf_5yr:
+    mode: "lenient"
+    window: 5
+    truncate_to_list_year: true
+    missing_year_action: "skip"
+  profit_quality:
+    formula: "(OCF - oper_profit) / total_assets"
+    cutoff_percentile: 20
+# ──────────────────────────────────────
+# 加权方式 (同D版)
+# ──────────────────────────────────────
+weighting:
+  method: "fcf_weighted"
+  note: "选样用FCF率排序，加权用FCF绝对值"
+  single_stock_cap: 0.10
+  redistribution: "iterative"
+# ──────────────────────────────────────
+# 调仓频率 (同D版)
+# ──────────────────────────────────────
+rebalance:
+  frequency: "quarterly"
+  months: [3, 6, 9, 12]
+# ──────────────────────────────────────
+# 代码参数映射
+# ──────────────────────────────────────
+code_params:
+  FcfUniverse:
+    index_code: "000906.SH"
+    strict_ocf: false
+  get_fcf_basket:
+    top_n: 50
+    use_ttm: true
+    buffer_zone: true
+    buffer_ratio: 0.40
+# ──────────────────────────────────────
+# 输出路径
+# ──────────────────────────────────────
+output:
+  baskets: "output/zz800_fcf_lenient_buffer_e40/all_baskets_2015_2026.json"
+  nav: "output/zz800_fcf_lenient_buffer_e40/backtest_nav_tr.csv"
+# ──────────────────────────────────────
+# 对标指数
+# ──────────────────────────────────────
+benchmark:
+  index_code: "932368.CSI"
+  index_name: "中证800自由现金流指数"
+# ──────────────────────────────────────
+# 预期效果
+# ──────────────────────────────────────
+hypothesis:
+  turnover_reduction: "预期换手率降低60-80%（相比B版）"
+  return_impact: "预期收益影响<1pp，缓冲区更宽松带来更低换手但FCF率轻微下降"

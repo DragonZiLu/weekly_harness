@@ -1,0 +1,197 @@
+# 沪深300自由现金流策略 — B版 (当前基线版本)
+
+name: hs300_fcf_lenient
+version: "B"
+baseline: true                     # ← 当前策略基线版本
+description: |
+  沪深300自由现金流选股策略 — fixed+宽松OCF版本 (基线)
+  选样: FCF率(FCF/EV)降序 → Top50
+  加权: 自由现金流(FCF绝对值)加权 + 10%封顶迭代重分配
+  ⚠️ 注意: 选样指标(FCF率) ≠ 加权指标(FCF绝对值)，与官方932366一致
+  对比说明:
+    A版(hs300_fcf):        circ_mv + 无TTM  + 宽松OCF → 年化14.69%
+    B版(本文件=基线):      total_mv + TTM   + 宽松OCF → 年化14.58%
+    C版(hs300_fcf_fixed):  total_mv + TTM   + 严格OCF → 年化10.84%
+
+# 样本空间
+universe:
+  index_code: "000300.SH"       # 沪深300
+  index_name: "沪深300"
+
+# 选股规则
+selection:
+  top_n: 50
+  use_ttm: true
+  skip_turnover_filter: true    # HS300成分股已通过流动性筛选
+
+# 行业过滤（同其他版本）
+industry_filter:
+  method: "shenwan_plus_keywords"
+  excluded_industries:
+    - "银行"
+    - "证券"
+    - "保险"
+    - "多元金融"
+    - "房地产开发"
+    - "房地产服务"
+  excluded_keywords:
+    - "金融"
+    - "银行"
+    - "证券"
+    - "保险"
+    - "地产"
+    - "房产"
+
+# FCF计算
+fcf:
+  capex_field: "c_pay_acq_const_fiolta"
+  capex_scope: "固定资产+无形资产+其他长期资产"
+
+  ttm_ref_periods:
+    "03": "0930"
+    "06": "0331"
+    "09": "0630"
+    "12": "0930"
+
+  # EV = total_mv + 总负债 - 货币资金
+  ev_market_cap: "total_mv"
+
+  # 5yr OCF: 宽松模式
+  ocf_5yr:
+    mode: "lenient"
+    window: 5
+    truncate_to_list_year: true
+    missing_year_action: "skip"
+
+  profit_quality:
+    formula: "(OCF - oper_profit) / total_assets"
+    cutoff_percentile: 20
+
+# 加权方式 (⚠️ 与官方932366一致)
+weighting:
+  method: "fcf_weighted"           # FCF绝对值加权(非FCF率加权)
+  note: "选样用FCF率排序，加权用FCF绝对值 → 选样指标≠加权指标"
+  single_stock_cap: 0.10           # 单股权重上限10%
+  redistribution: "iterative"      # 超出部分按比例分配给其他股票，迭代至全部≤10%
+
+# 调仓频率
+rebalance:
+  frequency: "quarterly"
+  rule: "second_friday_next_tradeday"
+  months: [3, 6, 9, 12]
+
+# 防前视偏差
+look_ahead_protection:
+  annual_report: "ann_date_as_of"
+  quarterly_report: "ann_date_as_of"
+  market_cap: "trade_date_as_of"
+
+# 代码参数映射
+code_params:
+  FcfUniverse:
+    index_code: "000300.SH"
+    strict_ocf: false
+  get_fcf_basket:
+    top_n: 50
+    use_ttm: true
+
+# 输出路径
+output:
+  baskets: "output/hs300_fcf_fixed_lenient/all_baskets_2015_2026.json"
+  nav: "output/hs300_fcf_fixed_lenient/backtest_nav_tr.csv"
+
+# 对标指数验证
+benchmark:
+  index_code: "932366.CSI"
+  index_name: "沪深300自由现金流指数"
+  source: "中证指数官方"
+  data_file: "data/932366_daily.csv"
+
+# 验证数据
+validation:
+  period: "2016-06-13 ~ 2026-03-16"
+  reference_date: "2024-12-16"
+
+  # 指数基准收益
+  benchmark_returns:
+    932366_ann: "11.40%"
+    932366_total: "194.3%"
+    hs300_ann: "4.30%"
+    hs300_total: "52.3%"
+    excess_vs_hs300: "+7.1pp"
+  
+  # 三版回测结果
+  backtest_results:
+    A_annual: "14.69%"
+    B_annual: "14.58%"
+    C_annual: "10.84%"
+    B_nav_final: 3.9012
+    B_excess_vs_932366: "+4.15pp"
+    A_to_B_impact: "-0.11pp (EV+TTM影响极小)"
+    B_to_C_impact: "-3.75pp (严格OCF显著降低收益)"
+
+  # B版与官方指数规则对比
+  rule_alignment:
+    ev_market_cap: "一致 ✅ (total_mv)"
+    ttm: "一致 ✅"
+    ocf_5yr: "一致 ✅ (宽松模式)"
+    industry_filter: "一致 ✅ (申万+关键词剔除金融地产)"
+    selection_method: "一致 ✅ (FCF率降序选Top50)"
+    weighting_method: "一致 ✅ (FCF绝对值加权+10%封顶迭代)"
+    profit_quality: "待验证 ⚠️ (PQ筛选前80% vs 官方编制方案)"
+
+  # 成分股重合度（A→B版差异）
+  overlap_stats:
+    avg_overlap_rate: "69.44%"
+    avg_added_removed: "各14.1只/期"
+    weight_spearman: "0.9990"
+    note: "A→B平均重合69%，但权重排序几乎一致(Spearman=0.999)"
+
+  # B→C版差异（宽松→严格OCF）
+  lenient_vs_strict:
+    avg_removed_by_strict_ocf: "4.2只/期"
+    underweight_periods:
+      - date: "2018-12-17"
+        c_version_holdings: 32
+        b_version_holdings: 36
+      - date: "2019-03-11"
+        c_version_holdings: 28
+        b_version_holdings: 34
+
+  # A→B 差异分析
+  vs_A_version:
+    ev_change_impact: "total_mv替代circ_mv → EV升高 → FCF率降低"
+    ttm_change_impact: "TTM口径 → FCF更及时"
+    actual_results:
+      A_annual: "14.69%"
+      B_annual: "14.58%"
+      diff: "-0.11pp (EV+TTM影响极小)"
+    new_entrants: "平均14.1只/期"
+    dropped: "平均14.1只/期"
+    weight_spearman: "0.9990 (权重排序几乎不变)"
+
+  # 562080 ETF持仓对比 (300现金流ETF华宝, 932366跟踪基金)
+  etf_562080_comparison:
+    fund_name: "300现金流ETF华宝 (562080.SH)"
+    fund_benchmark: "沪深300自由现金流指数收益率"
+    established: "2025-04-07"
+    periods:
+      - date: "20250630"
+        holdings: 51
+        weight_total: "100%"
+        B_vs_etf_recall: "60.6%"
+        B_vs_etf_spearman: "0.9435"
+      - date: "20251231"
+        holdings: 76
+        weight_total: "100%"
+    key_finding: "ETF与932366官方Spearman=0.9503, B版vs932366(0.9844)反而优于ETF"
+
+  # 600941(中国移动) 标的级诊断
+  600941_diagnosis:
+    fcf_rate_range: "4.3%~5.5% (波动)"
+    threshold_range: "4.3%~4.7% (B版篮子第50名FCF率)"
+    appeared_in_B: "11/18期 (上市后)"
+    missing_periods: "2024-09-16, 2024-12-16, 2025-03-17"
+    root_cause: "FCF率差0.2-0.3pp未达门槛; EV=2.4万亿过大稀释FCF率"
+    official_weight: "10.71% (932366第1大权重)"
+    note: "官方可能采用不同FCF计算口径(如不扣CAPEX)"

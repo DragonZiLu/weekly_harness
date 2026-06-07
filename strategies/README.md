@@ -1,22 +1,116 @@
-# 策略文件夹
+# 策略总览
 
-本目录存放所有交易策略的设计文档、回测结果和版本历史，方便跟踪策略演进。
+本目录包含所有量化选股策略的实现和文档。
+
+## 策略列表
+
+| 策略 | 版本 | 基线? | 样本空间 | EV | TTM | 5yr OCF | 年化收益 | 对标指数 | 目录 |
+|------|------|-------|---------|-----|-----|---------|---------|---------|------|
+| **沪深300 FCF** | A: 原始宽松 | | 沪深300(300只) | circ_mv | 无 | 宽松 | 14.69% | 932366.CSI | [hs300_fcf/](hs300_fcf/) |
+| **沪深300 FCF** | B: fixed+宽松 | ✅**基线** | 沪深300(300只) | total_mv | 有 | 宽松 | 14.58% | 932366.CSI | [hs300_fcf_lenient/](hs300_fcf_lenient/) |
+| **沪深300 FCF** | C: fixed+严格 | | 沪深300(300只) | total_mv | 有 | 严格 | 10.84% | 932366.CSI | [hs300_fcf_fixed/](../output/hs300_fcf_fixed/) |
+| **中证800 FCF** | A: 原始宽松 | | 中证800(800只) | circ_mv | 无 | 宽松 | 14.02% | 932368.CSI | [zz800_fcf/](zz800_fcf/) |
+| **中证800 FCF** | B: fixed+宽松 | ✅**基线** | 中证800(800只) | total_mv | 有 | 宽松 | TBD | 932368.CSI | [zz800_fcf_lenient/](zz800_fcf_lenient/) |
+| **中证800 FCF** | C: fixed+严格 | | 中证800(800只) | total_mv | 有 | 严格 | 10.48% | 932368.CSI | [zz800_fcf_fixed/](../output/zz800_fcf_fixed/) |
+| **中证全指 FCF** | — | | 中证全指(3000+只) | total_mv | 有 | 严格 | — | 932365.CSI | [fcf100/](fcf100/) |
+| **沪深300 FCF** | D: B版+缓冲区 | | 沪深300(300只) | total_mv | 有 | 宽松+缓冲区 | TBD | 932366.CSI | [hs300_fcf_lenient_buffer/](hs300_fcf_lenient_buffer/) |
+| **红利精选32** | — | | 精选池 | — | — | — | — | 自研 | [selected_32/](selected_32/) |
+
+## 基线版本 (B版: fixed+宽松OCF)
+
+B版(total_mv+TTM+宽松OCF)为当前**策略基线版本**，核心规则:
+- **选样**: FCF率(FCF/EV)降序 → Top50
+- **加权**: FCF绝对值加权 + 10%封顶迭代(⚠️ 选样指标≠加权指标)
+- **5yr OCF**: 宽松模式(上市不足5年截断)
+
+所有后续改进(如PQ调整、缓冲区规则)均以B版为基线对比。
+
+三个版本的设计是为了**隔离各规则变量的影响**：
+
+| 对比 | 隔离变量 | 其他变量 |
+|------|---------|---------|
+| A vs B | EV(circ_mv→total_mv) + TTM引入 | OCF规则相同（宽松） |
+| B vs C | 5yr OCF规则（宽松→严格） | EV+TTM相同（total_mv+TTM） |
+| A vs C | 综合影响（三个变量全变） | — |
+
+## 快速使用
+
+```bash
+# A版(原始宽松)
+python run_fcf_strategy.py --strategy hs300_fcf
+python run_fcf_strategy.py --strategy zz800_fcf
+
+# B版(fixed+宽松OCF) — 用于隔离EV+TTM影响
+python regenerate_b_baskets.py --index hs300
+python regenerate_b_baskets.py --index zz800
+```
+
+```python
+# B版 Python API
+from weekly_harness.fcf_universe import FcfUniverse
+
+uni = FcfUniverse(index_code="000906.SH", strict_ocf=False)  # B版: 宽松OCF
+uni.preload_all(download=False)
+basket = uni.get_fcf_basket("2025-06-16", top_n=50, use_ttm=True)
+```
+
+## 策略对比
+
+### FCF现金流系列
+
+三个FCF策略共享核心逻辑(行业剔除 → FCF率排名 → FCF加权10%封顶), 差异在:
+
+| 维度 | HS300 FCF | ZZ800 FCF | CSI全指FCF |
+|------|-----------|-----------|------------|
+| 样本量 | 300 | 800 | 3000+ |
+| 选股数 | 50 | 50 | 100 |
+| CAPEX口径 | 购建固定资产 | 含无形资产+其他长期资产 | 含无形资产+其他长期资产 |
+| TTM回退 | ✅ 年报 | ✅ 年报 | ✅ 年报 |
+| 5年OCF | TTM优先 | TTM优先 | TTM优先 |
+| 权重封顶 | 10% | 10% | 10% |
+| 行业过滤 | 申万+关键词 | 申万+关键词 | 申万+关键词 |
+
+### 与红利策略的区别
+
+| 维度 | FCF策略 | 红利策略 |
+|------|---------|---------|
+| 选股逻辑 | FCF率(FCF/EV) | 股息率+股债息差+确定性 |
+| 核心指标 | 现金创造能力 | 分红能力 |
+| 持仓数量 | 50-100只(高度分散) | ≤15只(集中) |
+| 加权方式 | FCF加权10%封顶 | 评分→阶梯仓位 |
+| 调仓频率 | 季度(第二周五) | 季度末 |
 
 ## 目录结构
 
 ```
 strategies/
-├── README.md                    # 本文件 - 策略文件夹说明
-├── selected_32/                 # 精选32红利轮动策略
-│   ├── README.md               # 策略设计文档
-│   ├── stock_pool.md           # 股票池清单
-│   ├── rules.md                # 买卖规则
-│   ├── backtest_2015_2026.md   # 回测结果
-│   └── changelog.md            # 版本变更记录
+├── README.md               ← 本文件
+├── hs300_fcf/              ← 沪深300 FCF策略
+│   ├── README.md               详细编制规则+验证报告
+│   └── strategy.yaml           可被 run_fcf_strategy.py 加载
+├── zz800_fcf/              ← 中证800 FCF策略
+│   ├── README.md
+│   └── strategy.yaml
+├── fcf100/                 ← 中证全指FCF策略
+│   └── README.md
+└── selected_32/            ← 红利精选32策略
+    ├── README.md
+    ├── rules.md
+    ├── stock_pool.md
+    └── changelog.md
 ```
 
-## 当前策略列表
+## 数据目录
 
-| 策略名 | 状态 | 回测期间 | 年化 | 描述 |
-|:---|:---|:---|:---|:---|
-| [精选32红利轮动](selected_32/) | 活跃 | 2015-2026 | +9.96% | 手工精选32只高息标的，季度评分轮动 |
+```
+data/
+├── fcf_financials/         ← 财务数据缓存 (cashflow/income/balance 年报+季度)
+└── index_weights/          ← 指数权重快照 (HS300/ZZ500/ZZ800/932366/932368)
+```
+
+## 验证报告
+
+| 报告 | 位置 |
+|------|------|
+| 沪深300FCF(932366)+562080ETF | [docs/hs300_fcf_932366_validation.md](../docs/hs300_fcf_932366_validation.md) |
+| 中证800FCF(932368) | [docs/zz800_fcf_932368_validation.md](../docs/zz800_fcf_932368_validation.md) |

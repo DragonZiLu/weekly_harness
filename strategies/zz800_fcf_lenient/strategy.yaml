@@ -1,0 +1,149 @@
+# 中证800自由现金流策略 — B版 (当前基线版本)
+
+name: zz800_fcf_lenient
+version: "B"
+baseline: true                     # ← 当前策略基线版本
+description: |
+  中证800自由现金流选股策略 — fixed+宽松OCF版本 (基线)
+  选样: FCF率(FCF/EV)降序 → Top50
+  加权: 自由现金流(FCF绝对值)加权 + 10%封顶迭代重分配
+  ⚠️ 注意: 选样指标(FCF率) ≠ 加权指标(FCF绝对值)，与官方932368一致
+  对比说明:
+    A版(zz800_fcf):        circ_mv + 无TTM  + 宽松OCF → 基准
+    B版(本文件=基线):      total_mv + TTM   + 宽松OCF → 隔离EV+TTM影响
+    C版(zz800_fcf_fixed):  total_mv + TTM   + 严格OCF → 加入严格OCF
+
+# 样本空间
+universe:
+  index_code: "000906.SH"       # 中证800 = 沪深300 + 中证500
+  index_name: "中证800"
+
+# 选股规则
+selection:
+  top_n: 50
+  use_ttm: true                  # TTM口径 (B版 vs A版的核心差异之一)
+  skip_turnover_filter: false
+
+# 行业过滤（同其他版本）
+industry_filter:
+  method: "shenwan_plus_keywords"
+  excluded_industries:
+    - "银行"
+    - "证券"
+    - "保险"
+    - "多元金融"
+    - "房地产开发"
+    - "房地产服务"
+  excluded_keywords:
+    - "金融"
+    - "银行"
+    - "证券"
+    - "保险"
+    - "地产"
+    - "房产"
+
+# FCF计算
+fcf:
+  capex_field: "c_pay_acq_const_fiolta"
+  capex_scope: "固定资产+无形资产+其他长期资产"
+
+  ttm_ref_periods:
+    "03": "0930"
+    "06": "0331"
+    "09": "0630"
+    "12": "0930"
+
+  # EV = total_mv + 总负债 - 货币资金（B版核心差异）
+  ev_market_cap: "total_mv"     # total_mv = 总市值（含非流通股）
+
+  # 5yr OCF: 宽松模式（B版与A版相同，与C版不同）
+  ocf_5yr:
+    mode: "lenient"              # lenient=宽松, strict=严格
+    window: 5
+    truncate_to_list_year: true  # 截断到上市年（允许次新股）
+    missing_year_action: "skip"  # 缺失年份跳过（宽松模式）
+
+  # 盈利质量
+  profit_quality:
+    formula: "(OCF - oper_profit) / total_assets"
+    cutoff_percentile: 20
+
+# 加权方式 (⚠️ 与官方932368一致)
+weighting:
+  method: "fcf_weighted"           # FCF绝对值加权(非FCF率加权)
+  note: "选样用FCF率排序，加权用FCF绝对值 → 选样指标≠加权指标"
+  single_stock_cap: 0.10           # 单股权重上限10%
+  redistribution: "iterative"      # 超出部分按比例分配给其他股票，迭代至全部≤10%
+
+# 调仓频率
+rebalance:
+  frequency: "quarterly"
+  rule: "second_friday_next_tradeday"
+  months: [3, 6, 9, 12]
+
+# 防前视偏差
+look_ahead_protection:
+  annual_report: "ann_date_as_of"
+  quarterly_report: "ann_date_as_of"
+  market_cap: "trade_date_as_of"
+
+# 代码参数映射
+code_params:
+  FcfUniverse:
+    index_code: "000906.SH"
+    strict_ocf: false            # 宽松OCF
+  get_fcf_basket:
+    top_n: 50
+    use_ttm: true
+
+# 输出路径
+output:
+  baskets: "output/zz800_fcf_fixed_lenient/all_baskets_2015_2026.json"
+  nav: "output/zz800_fcf_fixed_lenient/backtest_nav_tr.csv"
+
+# 对标指数验证
+benchmark:
+  index_code: "932368.CSI"
+  index_name: "中证800自由现金流指数"
+  source: "中证指数官方"
+  data_file: "data/932368_daily.csv"
+
+# 验证数据
+validation:
+  period: "2016-06-13 ~ 2026-03-16"
+  reference_date: "2024-12-16"        # 最近调仓期
+
+  # 指数基准收益
+  benchmark_returns:
+    932368_ann: "15.33%"
+    932368_total: "316.2%"
+    hs300_ann: "4.30%"
+    hs300_total: "52.3%"
+    excess_vs_hs300: "+11.0pp"
+
+  # B版与官方指数规则对比
+  rule_alignment:
+    ev_market_cap: "一致 ✅ (total_mv)"
+    ttm: "一致 ✅"
+    ocf_5yr: "一致 ✅ (宽松模式)"
+    industry_filter: "一致 ✅ (申万+关键词剔除金融地产)"
+    selection_method: "一致 ✅ (FCF率降序选Top50)"
+    weighting_method: "一致 ✅ (FCF绝对值加权+10%封顶迭代)"
+    profit_quality: "待验证 ⚠️ (PQ筛选前80% vs 官方编制方案)"
+
+  # 成分股重合度（基于C版vs 932368的已有数据，B版生成后更新）
+  overlap_stats:
+    avg_overlap_rate: "70.65%"         # C版数据，B版待更新
+    avg_added_removed: "各14.7只/期"    # C版数据
+    weight_spearman: "0.9978"          # C版数据
+    key_exclusions_strict_ocf:
+      - "中国海油 (932368权重10%+)"
+      - "中国移动 (932368权重5%+)"
+      - "中国电信"
+
+  # A→B 差异分析（B版篮子生成后填写）
+  vs_A_version:
+    ev_change_impact: "total_mv替代circ_mv → EV升高 → FCF率降低 → 高FCF率限售股标的可能被排除"
+    ttm_change_impact: "TTM口径替代年报 → FCF更及时 → 季度调仓准确性提高"
+    new_entrants: TBD
+    dropped: TBD

@@ -1,0 +1,89 @@
+# 中证800自由现金流策略 — X版 (全成分FCF，不做Top50截断)
+name: zz800_fcf_full_universe
+version: "X"
+baseline: false
+parent: "zz800_fcf_fixed_lenient"     # 基于B版筛选逻辑但不做Top50截断
+description: |
+  中证800自由现金流选股策略 — X版 (全成分FCF)
+  与B版核心差异: 不做Top50截断，所有通过筛选条件的公司均入选
+  选样: FCF率(FCF/EV)降序 → 全部合格公司入选（不做Top50截断）
+  加权: 自由现金流(FCF绝对值)加权 + 10%封顶迭代重分配 (同B/D/E/F版)
+  版本对比:
+    B版:  total_mv + TTM + 宽松OCF + Top50  (约269只合格，只选前50)
+    D版:  total_mv + TTM + 宽松OCF + 缓冲区±20% + Top50  (约269只合格，只选前50)
+    E版:  total_mv + TTM + 宽松OCF + 缓冲区±40% + Top50  (约269只合格，只选前50)
+    F版:  total_mv + TTM + 宽松OCF + 缓冲区±50% + Top50  (约269只合格，只选前50)
+    X版:  total_mv + TTM + 宽松OCF + 全成分入选  (约269只合格，全部入选)
+  X版核心理念:
+    "越多越好" vs "Top50精选" 的对比实验
+    不做FCF率排序截断，所有合格公司按FCF绝对值加权
+    验证Top50筛选是否真的提升了收益质量
+universe:
+  index_code: "000906.SH"
+  index_name: "中证800"
+selection:
+  use_ttm: true
+  skip_turnover_filter: true
+  top_n: null                # ★ 不做截断，全部合格公司入选
+  description: |
+    不做Top50截断：
+    所有通过 5yrOCF>0 + PQ前80% + 行业排除 的公司均入选
+    入选公司数随期变化（约97~339只）
+industry_filter:
+  method: "shenwan_plus_keywords"
+  excluded_industries:
+    - "银行"
+    - "证券"
+    - "保险"
+    - "多元金融"
+    - "房地产开发"
+    - "房地产服务"
+  excluded_keywords:
+    - "金融"
+    - "银行"
+    - "证券"
+    - "保险"
+    - "地产"
+    - "房产"
+fcf:
+  capex_field: "c_pay_acq_const_fiolta"
+  capex_scope: "固定资产+无形资产+其他长期资产"
+  ttm_ref_periods:
+    "03": "0930"
+    "06": "0331"
+    "09": "0630"
+    "12": "0930"
+  ev_market_cap: "total_mv"
+  ocf_5yr:
+    mode: "lenient"
+    window: 5
+    truncate_to_list_year: true
+    missing_year_action: "skip"
+  profit_quality:
+    formula: "(OCF - oper_profit) / total_assets"
+    cutoff_percentile: 20
+weighting:
+  method: "fcf_weighted"
+  note: "选样用FCF率排序（但不截断），加权用FCF绝对值"
+  single_stock_cap: 0.10
+  redistribution: "iterative"
+rebalance:
+  frequency: "quarterly"
+  months: [3, 6, 9, 12]
+code_params:
+  FcfUniverse:
+    index_code: "000906.SH"
+    strict_ocf: false
+  get_fcf_basket:
+    top_n: 800                # 获取全候选池
+    use_ttm: true
+    no_top_n_truncate: true   # ★ 不截断
+output:
+  baskets: "output/zz800_fcf_full_universe/all_baskets_2015_2026.json"
+  nav: "output/zz800_fcf_full_universe/backtest_nav_tr.csv"
+benchmark:
+  index_code: "932368.CSI"
+  index_name: "中证800自由现金流指数"
+hypothesis:
+  expected_return: "预期年化收益低于B版Top50（Top50集中了高FCF率标的），但回撤更小、更分散"
+  key_question: "Top50筛选是否真的有效？全成分FCF加权能否跑赢市值加权指数？"

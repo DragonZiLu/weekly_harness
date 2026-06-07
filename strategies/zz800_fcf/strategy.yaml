@@ -1,0 +1,101 @@
+# 中证800自由现金流策略配置
+name: zz800_fcf
+description: 中证800自由现金流选股策略 (对标932368.CSI)
+
+# 样本空间
+universe:
+  index_code: "000906.SH"         # 中证800 = 沪深300 + 中证500
+  index_name: "中证800"
+  sub_indices:
+    - "000300.SH"                  # 沪深300
+    - "000905.SH"                  # 中证500
+
+# 选股规则
+selection:
+  top_n: 50                        # 选股数量
+  use_ttm: true                     # 使用TTM数据口径
+  skip_turnover_filter: false       # 中证500成分股需成交额过滤
+
+# 行业过滤
+industry_filter:
+  method: "shenwan_plus_keywords"
+  excluded_industries:
+    - "银行"
+    - "证券"
+    - "保险"
+    - "多元金融"
+    - "房地产开发"
+    - "房地产服务"
+  excluded_keywords:
+    - "金融"
+    - "银行"
+    - "证券"
+    - "保险"
+    - "地产"
+    - "房产"
+
+# FCF计算
+fcf:
+  # 932368口径: 购建固定资产、无形资产和其他长期资产支付的现金
+  # tushare c_pay_acq_const_fiolta 已包含全部
+  capex_field: "c_pay_acq_const_fiolta"
+  capex_scope: "固定资产+无形资产+其他长期资产"  # 区别于932366
+
+  # TTM参考期映射
+  ttm_ref_periods:
+    "03": "0930"
+    "06": "0331"
+    "09": "0630"
+    "12": "0930"
+
+  # 5年OCF检查
+  ocf_5yr:
+    mode: "ttm_first_annual_fallback"
+    window: 5
+
+  # 盈利质量
+  profit_quality:
+    formula: "(OCF - oper_profit) / total_assets"
+    cutoff_percentile: 20
+
+# 加权方式
+weighting:
+  method: "fcf_weighted"
+  single_stock_cap: 0.10
+  redistribution: "iterative"
+
+# 调仓频率
+rebalance:
+  frequency: "quarterly"
+  rule: "second_friday_next_tradeday"
+  months: [3, 6, 9, 12]
+
+# 防前视偏差
+look_ahead_protection:
+  annual_report: "ann_date_as_of"
+  quarterly_report: "ann_date_as_of"
+  market_cap: "trade_date_as_of"
+
+# 验证结果 (2024-12-16 vs 932368.CSI)
+validation:
+  date: "2024-12-16"
+  benchmark: "932368.CSI"
+  recall: 0.84                          # 42/50
+  spearman: 0.9973                      # 封顶后
+  missing_count: 8
+  missing_reasons:
+    - "行业分类差异: 1只 (国网英大)"
+    - "5年OCF口径: 2只 (老凤祥/九号公司)"
+    - "PQ不达标: 1只 (金钼股份)"
+    - "排名边界: 4只 (长城汽车等)"
+
+# 数据源
+data_source:
+  financials: "tushare"
+  market_cap: "tushare daily_basic"
+  index_constituents: "tushare index_weight"
+  required_universe_data:
+    - index: "000300.SH"
+      count: 300
+    - index: "000905.SH"
+      count: 500

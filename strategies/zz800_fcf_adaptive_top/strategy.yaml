@@ -1,0 +1,103 @@
+# 中证800自由现金流策略 — G版 (自适应TopN = max(50, int(Q/100)*25))
+name: zz800_fcf_adaptive_top
+version: "G"
+baseline: false
+parent: "zz800_fcf_fixed_lenient"     # 基于B版逻辑，TopN改为自适应
+description: |
+  中证800自由现金流选股策略 — G版 (自适应TopN)
+  核心改进: TopN从固定50改为 max(50, int(全成分合格股数/100)*25)
+  
+  公式: TopN = max(50, int(Q/100) * 25)
+  
+  举例:
+    Q=111 (2015年) → int(1)*25=25 → max(50,25) = 50只 (下限50生效)
+    Q=194 (2017年) → int(1)*25=25 → max(50,25) = 50只
+    Q=266 (2016年) → int(2)*25=50 → max(50,50) = 50只 (恰好=50)
+    Q=300 (2023年) → int(3)*25=75 → max(50,75) = 75只 (扩展生效)
+    Q=339 (2026年) → int(3)*25=75 → max(50,75) = 75只
+    
+  理念:
+    - 下限50: 无论合格公司多少，至少选50只，保证基本分散度
+    - 扩展规则: 每100只合格公司增加25只选股(25%比例)
+    - Q<200: TopN=50 (与B版相同)
+    - Q≥300: TopN=75 (比B版多选25只，捕获更多FCF)
+    
+  版本对比:
+    B版: Top50固定 → 年化16.88%
+    X版: 全成分入选 → 年化13.61%
+    G版: max(50, int(Q/100)*25) → 自适应扩展
+    
+  加权: FCF绝对值加权 + 10%封顶迭代重分配
+
+universe:
+  index_code: "000906.SH"
+  index_name: "中证800"
+selection:
+  use_ttm: true
+  skip_turnover_filter: true
+  top_n_formula: "max(50, int(qualified_count / 100) * 25)"
+  top_n_min: 50
+  top_n_per_100: 25
+  description: |
+    自适应TopN = max(50, int(Q/100)*25)
+    下限50只，每100只合格公司增加25只
+industry_filter:
+  method: "shenwan_plus_keywords"
+  excluded_industries:
+    - "银行"
+    - "证券"
+    - "保险"
+    - "多元金融"
+    - "房地产开发"
+    - "房地产服务"
+  excluded_keywords:
+    - "金融"
+    - "银行"
+    - "证券"
+    - "保险"
+    - "地产"
+    - "房产"
+fcf:
+  capex_field: "c_pay_acq_const_fiolta"
+  capex_scope: "固定资产+无形资产+其他长期资产"
+  ttm_ref_periods:
+    "03": "0930"
+    "06": "0331"
+    "09": "0630"
+    "12": "0930"
+  ev_market_cap: "total_mv"
+  ocf_5yr:
+    mode: "lenient"
+    window: 5
+    truncate_to_list_year: true
+    missing_year_action: "skip"
+  profit_quality:
+    formula: "(OCF - oper_profit) / total_assets"
+    cutoff_percentile: 20
+weighting:
+  method: "fcf_weighted"
+  single_stock_cap: 0.10
+  redistribution: "iterative"
+rebalance:
+  frequency: "quarterly"
+  months: [3, 6, 9, 12]
+code_params:
+  FcfUniverse:
+    index_code: "000906.SH"
+    strict_ocf: false
+  get_fcf_basket:
+    top_n: 800
+    use_ttm: true
+  adaptive_top:
+    formula: "max(50, int(qualified_count / 100) * 25)"
+    min: 50
+    per_100: 25
+output:
+  baskets: "output/zz800_fcf_adaptive_top/all_baskets_2015_2026.json"
+  nav: "output/zz800_fcf_adaptive_top/backtest_nav_tr.csv"
+benchmark:
+  index_code: "932368.CSI"
+  index_name: "中证800自由现金流指数"
+hypothesis:
+  expected_return: "预期年化≈B版16.88%或略低(多选的25只FCF率较低)，但回撤更小、更分散"
+  key_question: "自适应扩展能否在牛市(Q多)时降低集中度风险，同时保持Top50精选的优势？"
