@@ -121,6 +121,13 @@ WATCHLIST = [
         "type": "etf",
         "benchmark": False,
     },
+    {
+        "code": "563020.SH",
+        "name": "红利低波ETF易方达(563020)",
+        "category": "红利ETF",
+        "type": "etf",
+        "benchmark": False,
+    },
 
     # ── 宽基基准 ────────────────────────────────────────────────
     {
