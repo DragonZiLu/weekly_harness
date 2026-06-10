@@ -528,12 +528,12 @@ FALLBACK_DATA = {
         "note": "易方达中证红利ETF(515180)，跟踪中证红利指数，规模约125亿，管理费0.15%/年，持仓加权PE=27.6x，ROE=9.9%"
     },
     "563020.SH": {  # 易方达中证红利低波动ETF
-        "close": 1.248, "pe_ttm": 10.5, "pb": 0.0,
-        "div_yield": 4.0,
-        "roe": 11.5, "dps_latest": 0.0,
+        "close": 1.173, "pe_ttm": 9.9, "pb": 0.0,
+        "div_yield": 3.67,
+        "roe": 11.1, "dps_latest": 0.0,
         "buyback_yield": 0.0, "revenue_growth": 0.0, "net_profit_growth": 0.0,
         "payout_ratio": 0.0, "total_mv": 45.0,
-        "note": "易方达红利低波ETF(563020)，跟踪中证红利低波动指数，红利+低波动双因子，管理费0.15%/年"
+        "note": "易方达红利低波ETF(563020)，跟踪中证红利低波动指数，红利+低波动双因子，管理费0.15%/年，2025年全年分红0.043元/份"
     },
     "601225.SH": {  # 陕西煤业
         # 网络验证：中国银河2026-05-11明确"当前收盘价对应股息率为4.0%，2025年每股分红0.948元"
@@ -928,8 +928,11 @@ class TushareDataFetcher:
         """
         从 fund_div 接口获取 ETF 分红数据，计算股息率
 
-        逻辑：取最近一次年度分红的每份分红金额，除以当前净值
+        逻辑：取最近一个完整年度的每份分红总额，除以当前净值
         fund_div 的关键字段：ex_date(除息日), div_cash(每份分红金额)
+
+        注意：fund_div 可能对同一笔分红存多条记录（不同 base_unit/ear_distr 版本），
+        需要用 (ann_date, ex_date) 组合去重；同时优先选最近完整年度而非当前年份
         """
         if close <= 0:
             return None
@@ -950,23 +953,38 @@ class TushareDataFetcher:
         df["ex_date"] = df["ex_date"].astype(str)
         df = df[df["ex_date"].str.len() >= 4]  # 过滤空值
 
-        # 去重：同一 ex_date 只保留一条（fund_div 可能对同一笔分红存多条记录）
-        df = df.drop_duplicates(subset=["ex_date"], keep="first")
+        # 去重：同一笔分红可能存多条，用 (ann_date, ex_date) 组合去重
+        df["ann_date"] = df["ann_date"].astype(str)
+        df = df.drop_duplicates(subset=["ann_date", "ex_date"], keep="first")
 
         df["year"] = df["ex_date"].str[:4]
 
         # 按年度汇总
         year_sums = df.groupby("year")["div_cash"].sum()
 
-        # 取最近两年中有分红的一年
+        # 选最近一个完整年度（优先前一年，当前年份可能不完整）
         current_year = str(datetime.now().year)
         prev_year = str(datetime.now().year - 1)
+        prev2_year = str(datetime.now().year - 2)
 
         target_year = None
-        for year in [current_year, prev_year]:
-            if year in year_sums and year_sums[year] > 0:
-                target_year = year
-                break
+        # 判断当前年份是否完整：6月之后才可能有全年4次分红
+        current_month = datetime.now().month
+        current_complete = (current_month >= 7) and (current_year in year_sums) and (year_sums[current_year] > 0)
+
+        # 优先选完整年度
+        if current_complete:
+            # 当前年度已过半且有分红，优先用当前年度
+            for year in [current_year, prev_year, prev2_year]:
+                if year in year_sums and year_sums[year] > 0:
+                    target_year = year
+                    break
+        else:
+            # 当前年度分红不完整（年初或尚无分红），优先选上一年
+            for year in [prev_year, prev2_year, current_year]:
+                if year in year_sums and year_sums[year] > 0:
+                    target_year = year
+                    break
 
         if target_year is None:
             return None
@@ -977,6 +995,19 @@ class TushareDataFetcher:
 
         # ETF 的 close 是净值（元），div_cash 也是每份金额（元）
         div_yield = round(total_div / close * 100, 4)
+
+        # 附加信息：当前年份累计分红（用于后续三源对比）
+        current_ytd_div = year_sums.get(current_year, 0)
+
+        self._etf_div_debug = {
+            "target_year": target_year,
+            "total_div": total_div,
+            "div_yield": div_yield,
+            "year_sums": {k: round(v, 4) for k, v in year_sums.items()},
+            "current_ytd_div": current_ytd_div,
+            "close": close,
+        }
+
         return div_yield
 
     def get_etf_weighted_metrics(self, ts_code: str) -> Optional[Dict]:
