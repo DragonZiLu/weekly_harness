@@ -138,6 +138,8 @@ COMPANIES = {
     "ETF": {
         "易方达红利ETF": {"ts_code": "515180.SH", "category": "ETF红利", "certainty": "AA",
                    "moat": "跟踪中证红利指数·分散投资低费率", "comment": "中证红利低换手策略，适合长期攒股"},
+        "红利低波ETF易方达": {"ts_code": "563020.SH", "category": "ETF红利", "certainty": "AA",
+                   "moat": "跟踪中证红利低波动指数·分散投资低费率", "comment": "红利+低波动双因子，回撤更小，管理费0.15%/年"},
     },
     # ── 第三类：周期资源红利 ─────────────────────────────────
     "矿业": {
@@ -524,6 +526,14 @@ FALLBACK_DATA = {
         "buyback_yield": 0.0, "revenue_growth": 0.0, "net_profit_growth": 0.0,
         "payout_ratio": 0.0, "total_mv": 125.0,
         "note": "易方达中证红利ETF(515180)，跟踪中证红利指数，规模约125亿，管理费0.15%/年，持仓加权PE=27.6x，ROE=9.9%"
+    },
+    "563020.SH": {  # 易方达中证红利低波动ETF
+        "close": 1.248, "pe_ttm": 10.5, "pb": 0.0,
+        "div_yield": 4.0,
+        "roe": 11.5, "dps_latest": 0.0,
+        "buyback_yield": 0.0, "revenue_growth": 0.0, "net_profit_growth": 0.0,
+        "payout_ratio": 0.0, "total_mv": 45.0,
+        "note": "易方达红利低波ETF(563020)，跟踪中证红利低波动指数，红利+低波动双因子，管理费0.15%/年"
     },
     "601225.SH": {  # 陕西煤业
         # 网络验证：中国银河2026-05-11明确"当前收盘价对应股息率为4.0%，2025年每股分红0.948元"
