@@ -82,6 +82,15 @@ class WeeklyReporter:
         self.weekly_reports_dir = self.data_dir / "weekly_reports"
         self.weekly_reports_dir.mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _prev_week_dir(week_str: str) -> str:
+        """从 '2026-W24' 推算出 '2026-W23'"""
+        import datetime as _dt
+        y, w = week_str.split("-W")
+        d = _dt.date.fromisocalendar(int(y), int(w), 1) - _dt.timedelta(days=7)
+        iso = d.isocalendar()
+        return f"{iso[0]}-W{iso[1]:02d}"
+
     # ─── 历史数据管理 ─────────────────────────────────────────
 
     def _get_dividend_history_table(self, ts_code: str, bond_yield: float, lookback_years: int = 10) -> Optional[str]:
@@ -583,6 +592,22 @@ class WeeklyReporter:
             lines.append(f"| 当前强势风格 | {style_icon} **{rotation.style}** |")
             lines.append(f"| 轮动强度 | {rotation.strength:.0%} |")
             lines.append(f"| 原因 | {rotation.reason} |")
+            
+            # 上周对比（从 signals.json 读取）
+            try:
+                prev_signal_path = week_dir.parent / self._prev_week_dir(week) / "artifacts" / "signals.json"
+                if prev_signal_path.exists():
+                    with open(prev_signal_path) as f:
+                        prev_signals = json.load(f)
+                    prev_rot = prev_signals.get("rotation", {})
+                    if prev_rot:
+                        prev_style = prev_rot.get("style", "")
+                        prev_detail = prev_rot.get("detail", {})
+                        if prev_style != rotation.style:
+                            lines.append(f"| ⚠️ 上周风格 | {style_icons.get(prev_style, '?')} **{prev_style}** → {style_icon} **{rotation.style}** |")
+            except:
+                pass
+
             lines.append(f"| 操作建议 | {rotation.suggestion} |")
             lines.append("")
 
@@ -1102,6 +1127,16 @@ class WeeklyReporter:
         # 检测信号变化
         signals = self._detect_signals(raw_scores, history)
 
+        # 提前获取市场信号（报告+存档都用）
+        if market_signals is None:
+            try:
+                from weekly_harness.market_signals import MarketSignals
+                from config.settings import tushare_cfg
+                ms = MarketSignals(tushare_token=tushare_cfg.token)
+                market_signals = ms.get_all_signals()
+            except Exception:
+                pass
+
         # 生成 Markdown 周报
         self._generate_markdown(raw_scores, validation, signals, history, week_dir, market_signals=market_signals)
 
@@ -1124,6 +1159,21 @@ class WeeklyReporter:
             "timestamp": datetime.now().isoformat(timespec="seconds"),
             **signals,
         }
+        # 附加市场轮动信号，供下周对比
+        if market_signals:
+            r = market_signals["rotation"]
+            signals_data["rotation"] = {
+                "style": r.style,
+                "strength": r.strength,
+                "reason": r.reason,
+                "detail": r.detail,
+            }
+            b = market_signals["bullbear"]
+            signals_data["bullbear"] = {
+                "phase": b.phase,
+                "confidence": b.confidence,
+                "reason": b.reason,
+            }
 
         if artifacts_dir:
             artifacts_dir.mkdir(parents=True, exist_ok=True)

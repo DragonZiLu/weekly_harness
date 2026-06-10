@@ -45,7 +45,8 @@
 | [七版对比报告](docs/zz800_bdefgxh_strategy_comparison.md) | 含G/H版扩展对比 |
 | [D/B版全面对比](docs/zz800_fcf_full_comparison.md) | vs 多基准详细对比 |
 | [B版复盘](docs/zz800_b_version_review.md) | 53.5%胜率、1.54盈亏比 |
-| [E版持仓分析](docs/zz800_e_holdings_return_analysis.md) | 含中海油等个股案例 |
+| [E版持仓分析](docs/zz800_e_holdings_return_analysis.md) | 2250条个股-期收益分布、板块归因、历史暴雷率 |
+| [季度持仓分析模板](analysis/quarterly_holdings_analysis.py) | 一键分析任意版本+任意调仓日的板块分布与归因 |
 | [HS300 FCF对比框架](docs/hs300_fcf_vs_932366_comparison_framework.md) | vs 932366官方指数 |
 | [数据诊断](docs/zz800_fcf_data_diagnostic.md) | 数据覆盖率与质量 |
 | [932368验证](docs/932368_validation_report.md) | 官方指数交叉验证 |
@@ -67,6 +68,46 @@ python run_g_full.py
 
 # H版（FCF绝对值排序）
 python run_h_full.py
+```
+
+### 季度持仓分析工具
+
+```bash
+# 任意版本 + 任意调仓日，一键输出四维分析
+python analysis/quarterly_holdings_analysis.py E 2026-03-16
+python analysis/quarterly_holdings_analysis.py X 2025-12-15
+python analysis/quarterly_holdings_analysis.py B 2024-06-17
+```
+
+**四部分输出：**
+
+| 部分 | 内容 | 说明 |
+|------|------|------|
+| **一、板块权重** | 策略 vs HS300 权重对比 | 🔥🔥 超配 / ❄️❄️ 低配标注 |
+| **二、本期收益** | 逐板块收益 & 贡献 | 右侧对照 HS300 同期表现 |
+| **三、差异归因** | 不持有板块错失 + 持有板块选股拖累 | 自动识别四大天然排除板块 |
+| **四、历史分位** | 可比口径排名 + 历史类似大跌 | HS300 全收益日线 + 调仓日期序列 |
+
+**关键设计：**
+
+- 自动识别策略不持有板块（电子/通信/银行/非银），计算剔除后的 HS300 可比收益
+- 申万行业 90+ 种自动归并为 30 个一级板块
+- 历史分位基于 HS300 全收益日线 + 46 期调仓日期序列
+- 支持 B/D/E/F/X 全部版本
+
+**典型输出示例（E版 2026-03-16）：**
+
+```
+E版总收益: -14.91%  |  HS300总收益: +3.44%
+HS300去掉4板块后: -9.93%  (vs E版差距 -5.0pp)
+可比口径历史分位: 最差的 5%（仅2期更差）
+
+E版完全不持有的板块收益:
+  通信: +5.04pp | 电子: +5.25pp  ← 错过的科技涨势
+
+共有板块E版额外拖累:
+  汽车: E版-19.7% vs HS300-8.7% → 额外-1.7pp
+  有色: E版-23.4% vs HS300-13.7% → 额外-0.9pp
 ```
 
 ---
@@ -94,7 +135,8 @@ weekly_harness/
 ├── analysis/
 │   ├── fund_tracker.py     # 基金/指数/策略净值跟踪
 │   ├── tracker_config.py   # 跟踪标的配置（16只）
-│   └── index_backtest.py   # 指数回测对比
+│   ├── index_backtest.py   # 指数回测对比
+│   └── quarterly_holdings_analysis.py  # ★ 季度持仓板块分析模板
 ├── docs/                    # ★ 报告文档（保留在git中）
 │   ├── project_progress_fcf_strategy.md  # 项目进展追踪
 │   ├── zz800_bdefx_strategy_comparison.md # FCF五版主报告
