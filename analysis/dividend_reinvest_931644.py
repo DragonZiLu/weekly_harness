@@ -32,7 +32,17 @@ import pandas as pd
 import numpy as np
 
 # ─── 配置 ────────────────────────────────────────────────────────────────────
-TUSHARE_TOKEN = "YOUR_TOKEN_HERE"   # ← 替换为你的 tushare token
+import os, sys
+from pathlib import Path
+# 从项目根 .env 读取 token
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "weekly_harness"))
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+TUSHARE_TOKEN = os.getenv("TUSHARE_TOKEN", "")
+if not TUSHARE_TOKEN:
+    from config.settings import tushare_cfg
+    TUSHARE_TOKEN = tushare_cfg.token
 INITIAL       = 1_000_000           # 初始投入 100万
 START         = "20160611"          # 回测起点（往前10年）
 END           = "20260611"          # 回测终点

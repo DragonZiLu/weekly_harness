@@ -743,30 +743,46 @@ class DividendUniverse:
 
         if prev_basket_codes and len(prev_basket_codes) > 0:
             max_keep = int(top_n * (1 - max_turnover))  # 至少保留80只
+            max_new  = top_n - max_keep                  # 最多新进20只
+
             # 在新Top N中找到上期持仓
             prev_in_new = [s for s in selected if s["ts_code"] in prev_basket_codes]
-            new_in_new = [s for s in selected if s["ts_code"] not in prev_basket_codes]
+            new_in_new  = [s for s in selected if s["ts_code"] not in prev_basket_codes]
 
-            # 上期持仓优先保留（最多max_keep只）
-            keep = prev_in_new[:max_keep]
+            # 上期持仓在TopN内的全保留
+            keep = list(prev_in_new[:max_keep])
             keep_codes = {s["ts_code"] for s in keep}
 
-            # 用新标的补足到top_n
-            remaining = top_n - len(keep)
-            fill = [s for s in new_in_new if s["ts_code"] not in keep_codes][:remaining]
+            # ★ 上期持仓跌出TopN的，按股息率召回补足保留数
+            #    (这些不算"新进"，是上期持仓的延续)
+            if len(keep) < max_keep:
+                fallen = [s for s in eligible
+                          if s["ts_code"] in prev_basket_codes
+                          and s["ts_code"] not in keep_codes]
+                recall = fallen[:max_keep - len(keep)]
+                keep.extend(recall)
+                keep_codes.update(s["ts_code"] for s in recall)
 
-            # 如果总数不足top_n，从eligible中继续补（不管keep是否达到max_keep）
-            extra_need = top_n - len(keep) - len(fill)
-            if extra_need > 0:
-                beyond = [s for s in eligible if s["ts_code"] not in {x["ts_code"] for x in (keep + fill)}]
-                fill.extend(beyond[:extra_need])
+            # 新进严格限制 ≤ max_new
+            fill = [s for s in new_in_new if s["ts_code"] not in keep_codes][:max_new]
+            fill_codes = {s["ts_code"] for s in fill}
+
+            # 兜底补足到top_n
+            shortfall = top_n - len(keep) - len(fill)
+            if shortfall > 0:
+                beyond = [s for s in eligible
+                          if s["ts_code"] not in keep_codes
+                          and s["ts_code"] not in fill_codes]
+                fill.extend(beyond[:shortfall])
 
             selected = keep + fill
-            actual_len = len(selected)
             if verbose:
-                actual_turnover = (actual_len - len(keep)) / actual_len * 100 if actual_len > 0 else 0
-                print(f"    换手限制: 保留{len(keep)}只 + 新进{len(fill)}只 = {actual_len}只 "
-                      f"(换手{actual_turnover:.1f}%)")
+                actual_new = len(fill)
+                actual_turnover = actual_new / len(selected) * 100 if selected else 0
+                recalled = len(keep) - len(prev_in_new[:max_keep])
+                extra = f', 召回跌出TopN的{recalled}只' if recalled > 0 else ''
+                print(f"    换手限制: 保留{len(keep)}只 + 新进{actual_new}只 = {len(selected)}只 "
+                      f"(换手{actual_turnover:.1f}%{extra})")
 
         # Step 5: 股息率加权 + 10%封顶
         selected = self._apply_dividend_weighting(selected, cap=0.10)

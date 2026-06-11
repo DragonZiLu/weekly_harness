@@ -71,13 +71,13 @@ rebalance:
 backtest:
   period: "2015-06-15 → 2026-06-15"
   periods: 22                            # 半年度
-  annual_return: 5.72
-  max_drawdown: -15.11
-  sharpe: 0.246
-  calmar: 0.379
+  annual_return: 5.93
+  max_drawdown: -15.23
+  sharpe: 0.256
+  calmar: 0.389
   win_rate: 68.2
-  nav: 1.844
-  turnover: 13.0
+  nav: 1.884
+  turnover: 12.5
 
 # ──────────────────────────────────────
 # 对比基准
