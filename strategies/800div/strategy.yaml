@@ -86,16 +86,16 @@ benchmarks:
   - code: "931644.CSI"
     name: "中证800红利(官方)"
     note: "选股重合度87%，权重结构基本对应"
+  - code: "FCF E版(对齐)"
+    name: "自建FCF策略(最优,同区间)"
+    annual: 16.43
+    note: "主动选股alpha显著更强, 5.93% vs 16.43% = -10.50pp"
   - code: "932368.CSI"
-    name: "中证800现金流"
+    name: "中证800现金流(对齐)"
     annual: 10.02
   - code: "H00300.CSI"
     name: "沪深300全收益"
     annual: 1.54
-  - code: "E版 FCF"
-    name: "自建FCF策略(最优)"
-    annual: 15.80
-    note: "主动选股alpha显著更强"
 
 # ──────────────────────────────────────
 # 代码入口
