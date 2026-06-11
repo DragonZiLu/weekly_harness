@@ -133,10 +133,10 @@ def get_price_on_date(price_df: pd.DataFrame, date_str: str) -> float:
 
 
 def simulate(
-    ts_code: str, buy_date: str, cash: float, verbose: bool = False
+    ts_code: str, buy_date: str, cash: float, verbose: bool = False, years: int = 10
 ) -> Tuple[List[YearRow], float, float, float]:
     """
-    模拟持有10年+股息再投资
+    模拟持有N年+股息再投资（默认10年）
 
     Returns: (yearly_rows, final_value, cagr, split_factor)
         split_factor: 送转股累积因子（初始=1，每10送X则乘以(1+X/10)）
@@ -144,7 +144,7 @@ def simulate(
     """
     # 日期范围
     start_dt = pd.Timestamp(buy_date[:10])
-    end_dt = start_dt + timedelta(days=365 * 10)
+    end_dt = start_dt + timedelta(days=365 * years)
 
     start_str = buy_date[:10]
     end_str = end_dt.strftime("%Y-%m-%d")
@@ -214,13 +214,13 @@ def simulate(
     start_value = shares * buy_price + remaining_cash
     split_factor = 1.0  # 送转股累积因子（用于换算买入价的"送转后等效值"）
 
-    for y in range(10):
+    for y in range(years):
         year = start_dt.year + y
         y_start = pd.Timestamp(f"{year}-01-01")
         if y == 0:
             y_start = start_dt
         y_end = pd.Timestamp(f"{year}-12-31")
-        if y == 9:
+        if y == years - 1:
             y_end = end_dt
 
         y_start_val = shares * get_price_on_date(price_df, y_start.strftime("%Y-%m-%d")) + remaining_cash
@@ -296,7 +296,6 @@ def simulate(
         ))
 
     final_val = shares * get_price_on_date(price_df, end_str) + remaining_cash
-    years = 10
     cagr = ((final_val / start_value) ** (1 / years) - 1) * 100 if start_value > 0 else 0
 
     return yearly_rows, final_val, cagr, split_factor

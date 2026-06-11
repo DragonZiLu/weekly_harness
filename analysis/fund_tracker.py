@@ -59,6 +59,26 @@ def fetch_index_daily(pro, code: str, start: str, end: str) -> pd.Series:
     return df.set_index("trade_date")["close"].sort_index()
 
 
+def fetch_stock_daily(pro, code: str, start: str, end: str) -> pd.Series:
+    """拉取个股日线（复权后价格）"""
+    df = pro.daily(ts_code=code, start_date=start, end_date=end,
+                   fields="trade_date,close")
+    time.sleep(0.12)
+    if df is None or df.empty:
+        return pd.Series(dtype=float)
+    df["trade_date"] = pd.to_datetime(df["trade_date"])
+    # 复权因子
+    adj = pro.adj_factor(ts_code=code, start_date=start, end_date=end,
+                          fields="trade_date,adj_factor")
+    time.sleep(0.12)
+    if adj is not None and not adj.empty:
+        adj["trade_date"] = pd.to_datetime(adj["trade_date"])
+        df = df.merge(adj, on="trade_date", how="left")
+        df["adj_factor"] = df["adj_factor"].fillna(1.0)
+        df["close"] = df["close"] * df["adj_factor"]
+    return df.set_index("trade_date")["close"].sort_index()
+
+
 def fetch_etf_nav(pro, code: str, start: str, end: str) -> pd.Series:
     df = pro.fund_daily(ts_code=code, start_date=start, end_date=end,
                         fields="trade_date,close")
@@ -132,6 +152,12 @@ def build_nav_series(pro, cfg: dict, start: str, end: str,
 
     elif t == "etf":
         s = fetch_etf_nav(pro, cfg["code"], start, end)
+        if s.empty:
+            return s
+        return s / s.iloc[0]
+
+    elif t == "stock":
+        s = fetch_stock_daily(pro, cfg["code"], start, end)
         if s.empty:
             return s
         return s / s.iloc[0]

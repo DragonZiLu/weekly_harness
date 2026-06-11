@@ -1,0 +1,139 @@
+# S&P 500 风格指数 — 沪深300增强方案
+# 对标标普500编制理念：盈利门槛 + 行业平衡 + 自由流通市值加权
+name: sp500_style
+version: "v5"
+baseline: false
+description: |
+  S&P 500 风格指数方案 — 对标标普500编制理念的A股宽基增强
+  核心思路: 盈利质量筛选 → 行业平衡分配 → 自由流通市值加权
+  选样: ZZ800成分股 → NI+FCF双正过滤 → 流动性过滤 → 申万108行业平衡 → Top N
+  加权: 自由流通市值(free_share × close)加权 + 10%封顶
+  版本演进:
+    v1:  年报 NI>0, circ_mv加权                    → 年化 5.87%
+    v2:  free_float_mv加权(修正银行股)              → 年化 6.23%
+    v3:  S&P 500双条件(单季+TTM NI>0)              → 年化 6.38%
+    v4:  FCF>0替代净利润(OCF-Capex)                 → 年化 8.89%
+    v5:  NI+FCF双正(最严格)                         → 年化 9.06%
+    v5-Top100: 精选100只                            → 年化 10.69% ★推荐
+# ──────────────────────────────────────
+# 样本空间
+# ──────────────────────────────────────
+universe:
+  index_code: "000906.SH"
+  index_name: "中证800"
+# ──────────────────────────────────────
+# 选股规则
+# ──────────────────────────────────────
+selection:
+  method: "profit_screen + industry_balance + market_cap_weight"
+  target_n: 100                      # ★ 推荐100只 (可选300)
+  steps:
+    - step: 1
+      name: "成分股获取"
+      description: "按调仓日实时获取ZZ800成分股（防前视偏差）"
+    - step: 2
+      name: "盈利过滤(v5双正)"
+      description: |
+        S&P 500 标准双条件（连续4季度滚动求和）:
+        - 单季净利润 > 0（最新可用季度）
+        - 连续4季度滚动净利润 > 0
+        - 单季 FCF > 0（OCF - Capex）
+        - 连续4季度滚动 FCF > 0
+        滚动4Q公式: rolling_4Q = 前一年Q4累计 + 最新累计 - 上年同期累计
+    - step: 3
+      name: "流动性过滤"
+      description: "流通市值/总市值 ≥ 15%"
+    - step: 4
+      name: "行业平衡分配"
+      description: |
+        纯申万一级行业(108个细分行业)，按自由流通市值比例分配slots
+        - 每个行业至少1只(min=1保护)
+        - 行业内按流通市值排序选股
+        - 避免GICS粗粒度板块内好/差子行业互相稀释
+    - step: 5
+      name: "自由流通市值加权"
+      description: "free_float_mv = free_share(万股) × close(元)，单股10%封顶"
+# ──────────────────────────────────────
+# FCF计算
+# ──────────────────────────────────────
+fcf:
+  formula: "n_cashflow_act - c_pay_acq_const_fiolta"
+  capex_scope: "固定资产+无形资产+其他长期资产"
+  ttm_method: "quarterly_rolling_4q"   # 季度滚动求和(S&P 500标准)
+  ev_market_cap: "circ_mv"
+# ──────────────────────────────────────
+# 行业分类
+# ──────────────────────────────────────
+industry:
+  method: "shenwan_level1"            # 纯申万一级(108行业)
+  note: "GICS粗粒度(11板块)已实验失败，详见报告Section 六"
+  no_exclusion: true                   # 不剔除任何行业(与FCF策略不同)
+# ──────────────────────────────────────
+# 加权方式
+# ──────────────────────────────────────
+weighting:
+  method: "free_float_market_cap"
+  formula: "free_share × close"
+  single_stock_cap: 0.10
+  fallback: "circ_mv"                  # free_share不可用时兜底
+# ──────────────────────────────────────
+# 调仓频率
+# ──────────────────────────────────────
+rebalance:
+  frequency: "quarterly"
+  months: [3, 6, 9, 12]
+  note: "与FCF策略调仓日对齐"
+# ──────────────────────────────────────
+# 回测统计
+# ──────────────────────────────────────
+backtest:
+  period: "2015-03 → 2026-03"
+  periods: 46                           # 季度数
+  annual_return: 10.69
+  max_drawdown: -33.79
+  sharpe: 0.511
+  nav: 3.13
+  note: "季度采样口径，不可直接与日线基准对比"
+# ──────────────────────────────────────
+# 对比基准
+# ──────────────────────────────────────
+benchmarks:
+  - code: "E版 FCF Top50"
+    annual: 15.80
+    note: "主动选股alpha引擎，不可比"
+  - code: "X版 FCF加权"
+    annual: 10.12
+    nav: 2.96
+    note: "同口径全成分FCF加权，SP500风格+0.57pp"
+  - code: "932368.CSI"
+    name: "中证800现金流指数"
+    annual: 11.19
+    nav: 3.30
+  - code: "H00300.CSI"
+    name: "沪深300全收益"
+    annual: 4.68
+    nav: 1.67
+    note: "宽基基准，SP500风格+6.01pp超额"
+# ──────────────────────────────────────
+# 代码入口
+# ──────────────────────────────────────
+code:
+  engine: "weekly_harness/sp500_style.py"
+  entry: "run_sp500_style.py"
+  run_command: "python run_sp500_style.py --use-both --target-n 100"
+  contrib_analysis: "analysis/sp500_top100_contrib.py"
+# ──────────────────────────────────────
+# 输出路径
+# ──────────────────────────────────────
+output:
+  baskets: "output/sp500_style_100/baskets/"
+  nav_daily: "output/sp500_style_100/nav_daily.csv"
+# ──────────────────────────────────────
+# 关键发现
+# ──────────────────────────────────────
+findings:
+  concentration: "Top10贡献占比45.7%，茅台一只贡献22.49%"
+  top_sectors: "白酒(+32%) + 家用电器(+16%) + 通信设备(+15%) = 前3行业占63%"
+  nature: "大市值+盈利质量筛选器，非选股alpha引擎"
+  gics_experiment: "GICS粗粒度板块(11个)实验失败，纯申万108行业更优"
+  performance: "预建O(1)索引，选股15min→32s(~30x加速)"

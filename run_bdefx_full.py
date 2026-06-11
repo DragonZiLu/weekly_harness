@@ -189,10 +189,31 @@ nav_df = pd.DataFrame([
     {'rb_date': REBALANCE_DATES[i], 'next_rb': REBALANCE_DATES[i+1]}
     for i in range(len(REBALANCE_DATES)-1)
 ])
-df_idx = pd.read_csv("data/index_daily/932368.CSI.csv")
-df_idx['trade_date'] = df_idx['trade_date'].astype(str); df_idx = df_idx.sort_values('trade_date')
-df_hs = pd.read_csv("data/index_daily/000300.SH.csv")
-df_hs['trade_date'] = df_hs['trade_date'].astype(str); df_hs = df_hs.sort_values('trade_date')
+# ★ 全收益基准: 932368价格指数 + 股息调整比例估算全收益
+df_idx_price = pd.read_csv("data/index_daily/932368.CSI.csv")
+df_idx_price['trade_date'] = df_idx_price['trade_date'].astype(str)
+df_idx_price = df_idx_price[['trade_date','close']].rename(columns={'close':'p'}).sort_values('trade_date')
+
+# 沪深300价格指数 → 计算股息调整比例
+df_hs_p = pd.read_csv("data/index_daily/000300.SH.csv")
+df_hs_p['trade_date'] = df_hs_p['trade_date'].astype(str)
+df_hs_p = df_hs_p[['trade_date','close']].rename(columns={'close':'hs_p'})
+df_hs_tr = pd.read_csv("data/index_daily/H00300.CSI.csv")
+df_hs_tr['trade_date'] = df_hs_tr['trade_date'].astype(str)
+df_hs_tr = df_hs_tr[['trade_date','close']].rename(columns={'close':'hs_tr'})
+
+# 合并: 股息调整比例 = H00300/000300
+df_div = df_hs_p.merge(df_hs_tr, on='trade_date', how='inner')
+df_div['div_adj'] = df_div['hs_tr'] / df_div['hs_p']
+
+# 932368全收益估算 = 价格 × div_adj
+df_idx = df_idx_price.merge(df_div[['trade_date','div_adj']], on='trade_date', how='inner')
+df_idx['close'] = df_idx['p'] * df_idx['div_adj']  # ★ 全收益估算
+
+# HS300全收益基准（直接从H00300加载）
+df_hs = pd.read_csv("data/index_daily/H00300.CSI.csv")
+df_hs['trade_date'] = df_hs['trade_date'].astype(str)
+df_hs = df_hs[['trade_date','close']].sort_values('trade_date')
 
 def idx_ret(df, s, e):
     sk, ek = s.replace('-',''), e.replace('-','')

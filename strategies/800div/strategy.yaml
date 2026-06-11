@@ -1,0 +1,133 @@
+# 中证800红利指数（931644）复现策略
+name: zz800_dividend
+version: "v1"
+baseline: false
+description: |
+  中证800红利指数（931644）复现 — 纯被动红利选股
+  选样：ZZ800成分股 → 连续3年分红 → 股利支付率∈(0,1) → 三年平均股息率Top100
+  加权：股息率加权 + 10%封顶迭代
+  调仓：半年度（6月/12月），换手≤20%
+
+# ──────────────────────────────────────
+# 样本空间
+# ──────────────────────────────────────
+universe:
+  index_code: "000906.SH"
+  index_name: "中证800"
+
+# ──────────────────────────────────────
+# 选股规则
+# ──────────────────────────────────────
+selection:
+  method: "dividend_yield_ranking"
+  target_n: 100
+  steps:
+    - step: 1
+      name: "成分股获取"
+      description: "按调仓日获取ZZ800实时成分股"
+    - step: 2
+      name: "连续分红过滤"
+      description: "过去三个完整会计年度每年均有现金分红(DPS>0)"
+    - step: 3
+      name: "股利支付率过滤"
+      description: |
+        过去三年股利支付率均值∈(0,1) 且 最近一年∈(0,1)
+        支付率 = DPS / basic_eps（每股）
+        数据不足时保守通过
+    - step: 4
+      name: "股息率计算"
+      description: |
+        三年平均现金股息率 = AVG(股息率_i), i=1,2,3
+        股息率_i = DPS_i / 年末股价_i
+        每年独立计算，再取平均（中证指数官方公式）
+    - step: 5
+      name: "Top100 + 换手限制"
+      description: |
+        按三年平均股息率降序取Top100
+        换手率限制≤20%（上期持仓至少保留80只）
+        不足Top100时从排名外补足
+
+# ──────────────────────────────────────
+# 加权方式
+# ──────────────────────────────────────
+weighting:
+  method: "dividend_yield_weighted"
+  formula: "weight = div_yield / sum(div_yield)"
+  single_stock_cap: 0.10
+  redistribution: "iterative"            # 超限部分迭代重分配
+
+# ──────────────────────────────────────
+# 调仓频率
+# ──────────────────────────────────────
+rebalance:
+  frequency: "semi_annual"
+  months: [6, 12]
+  rule: "second_friday_next_tradeday"
+  max_turnover: 0.20
+
+# ──────────────────────────────────────
+# 回测统计
+# ──────────────────────────────────────
+backtest:
+  period: "2015-06-15 → 2026-06-15"
+  periods: 22                            # 半年度
+  annual_return: 5.72
+  max_drawdown: -15.11
+  sharpe: 0.246
+  calmar: 0.379
+  win_rate: 68.2
+  nav: 1.844
+  turnover: 13.0
+
+# ──────────────────────────────────────
+# 对比基准
+# ──────────────────────────────────────
+benchmarks:
+  - code: "931644.CSI"
+    name: "中证800红利(官方)"
+    note: "选股重合度87%，权重结构基本对应"
+  - code: "932368.CSI"
+    name: "中证800现金流"
+    annual: 10.02
+  - code: "H00300.CSI"
+    name: "沪深300全收益"
+    annual: 1.54
+  - code: "E版 FCF"
+    name: "自建FCF策略(最优)"
+    annual: 15.80
+    note: "主动选股alpha显著更强"
+
+# ──────────────────────────────────────
+# 代码入口
+# ──────────────────────────────────────
+code:
+  engine: "weekly_harness/dividend_universe.py"
+  entry: "run_800div_full.py"
+  run_command: "python run_800div_full.py"
+  nav_only: "python run_800div_full.py --nav-only"
+
+# ──────────────────────────────────────
+# 输出路径
+# ──────────────────────────────────────
+output:
+  baskets: "output/800div/all_baskets_2015_2026.json"
+  nav_csv: "output/800div/backtest_nav_tr.csv"
+  report: "docs/2026-06-11_800红利指数复现.md"
+
+# ──────────────────────────────────────
+# 数据依赖
+# ──────────────────────────────────────
+data:
+  dividend: "data/dividend_history/*.csv"
+  financials: "data/fcf_financials/income_*.csv"
+  index_weights: "data/index_weights/index_weight_000906.SH.csv"
+  prices: "data/price_snapshots/*.csv"
+
+# ──────────────────────────────────────
+# 关键发现
+# ──────────────────────────────────────
+findings:
+  replication: "与931644官方选股重合87%，复现质量高"
+  vs_fcf: "年化5.72%远低于FCF策略15.80%，红利因子弱于质量因子"
+  vs_hs300: "+4.18pp超额，红利在熊市中防御性更好"
+  performance_fix: "income查询从pandas filter改为O(1)预索引，每期42s→<1s"

@@ -8,11 +8,12 @@
     name      自定义名称
     category  分类标签，用于分组展示
     benchmark 是否作为基准对比（不算超额，仅展示）
-    type      "etf" | "index_price" | "index_tr" | "strategy"
+    type      "etf" | "index_price" | "index_tr" | "strategy" | "stock"
               - etf:          直接用 ETF 净值/价格（复权）
               - index_price:  价格指数 + 估算股息再投
               - index_tr:     全收益指数，直接用
               - strategy:     本地自建策略 nav（从 nav_path 读取）
+              - stock:        个股日线（复权价）
     nav_path  仅 type=="strategy" 时需要，相对项目根的路径
     div_add   仅 index_price 时用，额外补偿股息率（pp），默认 0
 """
@@ -99,12 +100,38 @@ WATCHLIST = [
         "benchmark": False,
     },
 
+    # ── 自建 800红利策略 ────────────────────────────────────────
+    {
+        "code": "MY_800DIV",
+        "name": "自建800红利Top100（复现931644）",
+        "category": "自建红利策略",
+        "type": "strategy",
+        "nav_path": "output/800div/backtest_nav_tr.csv",
+        "benchmark": False,
+    },
+    {
+        "code": "MY_800DIVX",
+        "name": "自建800红利X版（全合规加权）",
+        "category": "自建红利策略",
+        "type": "strategy",
+        "nav_path": "output/800div_x/backtest_nav_tr.csv",
+        "benchmark": False,
+    },
+
     # ── 红利相关指数 & ETF ──────────────────────────────────────
     {
         "code": "H00922.CSI",
         "name": "中证红利全收益",
         "category": "红利指数",
         "type": "index_tr",
+        "benchmark": False,
+    },
+    {
+        "code": "931644.CSI",
+        "name": "中证800红利(价格)",
+        "category": "红利指数",
+        "type": "index_price",
+        "div_add": 0.5,
         "benchmark": False,
     },
     {
@@ -150,5 +177,14 @@ WATCHLIST = [
         "category": "宽基基准",
         "type": "index_tr",
         "benchmark": True,
+    },
+
+    # ── 精选个股跟踪 ────────────────────────────────────────────
+    {
+        "code": "000423.SZ",
+        "name": "东阿阿胶",
+        "category": "精选个股",
+        "type": "stock",
+        "benchmark": False,
     },
 ]
