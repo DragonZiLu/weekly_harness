@@ -12,6 +12,7 @@
 | **中证800 FCF** | A: 原始宽松 | | 中证800(800只) | circ_mv | 无 | 宽松 | 14.02% | 932368.CSI | [zz800_fcf/](zz800_fcf/) |
 | **中证800 FCF** | B: fixed+宽松 | ✅**基线** | 中证800(800只) | total_mv | 有 | 宽松 | TBD | 932368.CSI | [zz800_fcf_lenient/](zz800_fcf_lenient/) |
 | **中证800 FCF** | C: fixed+严格 | | 中证800(800只) | total_mv | 有 | 严格 | 10.48% | 932368.CSI | [zz800_fcf_fixed/](../output/zz800_fcf_fixed/) |
+| **中证800 FCF** | **I: 二维质量** | | 中证800(800只) | total_mv | 有 | PQ+OCF/利润 | **17.01%** 🔥 | E版/932368 | [zz800_fcf_2d_quality/](zz800_fcf_2d_quality/) |
 | **中证全指 FCF** | — | | 中证全指(3000+只) | total_mv | 有 | 严格 | — | 932365.CSI | [fcf100/](fcf100/) |
 | **沪深300 FCF** | D: B版+缓冲区 | | 沪深300(300只) | total_mv | 有 | 宽松+缓冲区 | TBD | 932366.CSI | [hs300_fcf_lenient_buffer/](hs300_fcf_lenient_buffer/) |
 | **S&P 500风格** | v5-Top100 | | 中证800(800只) | — | — | — | **10.69%** | X版/932368/HS300 | [sp500_style/](sp500_style/) |

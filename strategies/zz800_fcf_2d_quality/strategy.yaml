@@ -1,0 +1,133 @@
+# I版：E版 + OCF/营业利润>1.0 二维质量过滤
+name: zz800_fcf_2d_quality
+version: "I"
+baseline: false
+description: |
+  E版基础 + 二维质量过滤：OCF/营业利润 > 1.0
+  核心逻辑：在原有PQ过滤(OCF-利润)/总资产基础上，增加OCF/利润>1.0
+  双保险：既控资产效率(PQ)，又要求现金覆盖利润(OCF/利润)
+  选股: Top50, EV加权, ±40%缓冲, TTM, 宽松OCF
+
+# ──────────────────────────────────────
+# 样本空间
+# ──────────────────────────────────────
+universe:
+  index_code: "000906.SH"
+  index_name: "中证800"
+
+# ──────────────────────────────────────
+# 选股规则
+# ──────────────────────────────────────
+selection:
+  method: "fcf_yield_ranking"
+  target_n: 50
+  buffer: 0.40                          # ±40%
+  steps:
+    - step: 1
+      name: "成分股 + 行业过滤"
+      description: "ZZ800成分股，剔除金融/房地产"
+    - step: 2
+      name: "FCF计算(TTM口径)"
+      description: "FCF = OCF - Capex, TTM滚动"
+    - step: 3
+      name: "PQ过滤"
+      description: "profit_quality = (OCF-营业利润)/总资产, 剔除后20%"
+    - step: 4
+      name: "★ OCF/利润过滤(新增)"
+      description: |
+        OCF / 营业利润 > 1.0
+        排除: 利润≤0, 利润<100万(小票异常), 数据缺失
+    - step: 5
+      name: "FCF>0 + 5年OCF>0"
+      description: "正现金流 + 连续5年经营现金流为正(宽松截断)"
+    - step: 6
+      name: "FCF率排名 Top50 + ±40%缓冲"
+      description: "按FCF/EV降序, 缓冲区保留≥30只上期持仓"
+
+# ──────────────────────────────────────
+# 加权方式
+# ──────────────────────────────────────
+weighting:
+  method: "fcf_weighted"
+  single_stock_cap: 0.10
+  redistribution: "iterative"
+  ev_formula: "total_mv × 10000 + total_liab - money_cap"
+
+# ──────────────────────────────────────
+# 调仓频率
+# ──────────────────────────────────────
+rebalance:
+  frequency: "quarterly"
+  months: [3, 6, 9, 12]
+  rule: "second_friday_next_tradeday"
+
+# ──────────────────────────────────────
+# 回测统计
+# ──────────────────────────────────────
+backtest:
+  period: "2015-03-16 → 2026-03-16"
+  periods: 44                            # 季度
+  annual_return: 17.01
+  max_drawdown: -38.97
+  sharpe: 0.569
+  nav: 5.630
+  turnover: 32.7
+
+# ──────────────────────────────────────
+# 对比基准
+# ──────────────────────────────────────
+benchmarks:
+  - code: "E版"
+    name: "E版(PQ过滤,基线)"
+    annual: 15.80
+    nav: 5.210
+    note: "I版+1.21pp, 二维质量显著优于单一PQ"
+  - code: "932368.CSI"
+    name: "中证800现金流"
+    annual: 11.19
+    nav: 3.30
+  - code: "H00300.CSI"
+    name: "沪深300全收益"
+    annual: 2.36
+    nav: 1.30
+
+# ──────────────────────────────────────
+# 逐年对比
+# ──────────────────────────────────────
+yearly:
+  2016: { i: 29.71, e: 27.25, excess: 2.46 }
+  2017: { i: 46.07, e: 45.36, excess: 0.71 }
+  2018: { i: 3.05, e: 0.90, excess: 2.15 }
+  2019: { i: -15.85, e: -6.91, excess: -8.94 }
+  2020: { i: 40.10, e: 41.65, excess: -1.55 }
+  2021: { i: 24.30, e: 29.50, excess: -5.21 }
+  2022: { i: 21.45, e: 18.48, excess: 2.98 }
+  2023: { i: 30.38, e: 25.53, excess: 4.85 }
+  2024: { i: 2.20, e: 7.58, excess: -5.38 }
+  2025: { i: 32.66, e: 34.69, excess: -2.02 }
+
+# ──────────────────────────────────────
+# 代码入口
+# ──────────────────────────────────────
+code:
+  engine: "weekly_harness/fcf_universe.py"
+  entry: "run_i_full.py"
+  run_command: "python run_i_full.py"
+  nav_only: "python run_i_full.py --nav-only"
+  key_param: "use_ocf_profit_filter=True"
+
+# ──────────────────────────────────────
+# 输出路径
+# ──────────────────────────────────────
+output:
+  baskets: "output/zz800_fcf_2d_quality/all_baskets_2015_2026.json"
+  nav_csv: "output/zz800_fcf_2d_quality/backtest_nav_tr.csv"
+
+# ──────────────────────────────────────
+# 关键发现
+# ──────────────────────────────────────
+findings:
+  improvement: "vs E版 +1.21pp, 二维质量过滤显著有效"
+  mechanism: "OCF/利润>1.0排除利润虚胖标的, PQ确保资产效率"
+  tradeoff: "换手率32.7%(vs E版23.1%), 2019年最差(-8.94pp)"
+  best_year: "2023: 30.38pp vs E版 +4.85pp"

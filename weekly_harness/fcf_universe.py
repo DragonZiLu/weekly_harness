@@ -1189,6 +1189,7 @@ class FcfUniverse:
         top_n: int = 100,
         verbose: bool = False,
         use_ttm: bool = False,
+        use_ocf_profit_filter: bool = False,
     ) -> Dict[str, Dict]:
         """
         获取 date_str 时的 FCF 精选股票池。
@@ -1199,6 +1200,7 @@ class FcfUniverse:
         top_n : 选取前 N 只
         verbose : 是否打印筛选过程
         use_ttm : 是否使用 TTM 数据（官方编制方案要求"过去一年"=TTM）
+        use_ocf_profit_filter : 是否启用 OCF/营业利润 > 1.0 二维质量过滤
                   若季度数据不可用则自动回退到年报
 
         Returns
@@ -1367,12 +1369,22 @@ class FcfUniverse:
 
         # ── Step 6: 四条条件同时过滤 ──
         # 条件：(1)非金融地产(已做) (2)FCF>0且EV>0 (3)OCF连续为正 (4)盈利质量≥cutoff
+        # 条件(4b)(可选): OCF/营业利润 > 1.0
         # 先做可用缓存快速判断的：FCF>0, 盈利质量≥cutoff, OCF>0
         passed_fast = []
         for c in candidates:
             # 条件(4): 盈利质量（缺失/NaN 数据直接淘汰，避免新上市股票绕过滤）
             if c["profit_quality"] is None or (isinstance(c["profit_quality"], float) and math.isnan(c["profit_quality"])) or c["profit_quality"] < pq_cutoff:
                 continue
+            # 条件(4b): OCF/营业利润 > 1.0（二维质量过滤，可选）
+            if use_ocf_profit_filter:
+                oper_cf = c.get("oper_cf")
+                oper_profit = c.get("oper_profit")
+                if oper_cf is None or oper_profit is None or oper_profit <= 1e6:
+                    # 利润缺失/为负/过小(低于100万)→直接排除
+                    continue
+                if oper_cf / oper_profit <= 1.0:
+                    continue
             # 条件(2): FCF > 0（先做，EV需要API后续拉取）
             if c["fcf"] is None or c["fcf"] <= 0:
                 continue
@@ -1403,7 +1415,10 @@ class FcfUniverse:
             passed_fast.append(c)
 
         if verbose:
-            print(f"  [FCF] Step6: FCF>0, 盈利质量≥cutoff, 5年OCF>0 → {len(passed_fast)} 只")
+            filter_desc = "FCF>0, PQ≥cutoff, 5yrOCF>0"
+            if use_ocf_profit_filter:
+                filter_desc += ", OCF/利润>1.0"
+            print(f"  [FCF] Step6: {filter_desc} → {len(passed_fast)} 只")
 
         if not passed_fast:
             return {}
