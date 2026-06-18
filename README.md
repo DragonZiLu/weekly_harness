@@ -1,150 +1,225 @@
 # weekly_harness — A股量化投资研究系统
 
-本项目包含两大策略体系：
+本项目包含四大策略体系：
 
-- **🧊 FCF自由现金流策略**：中证800/沪深300成分池FCF选股与多版本回测（主力方向）
-- **🔥 红利周期轮动策略**：红利股三层估值体系与周度评估
-
-> 📋 **[FCF策略项目进展追踪文档](docs/project_progress_fcf_strategy.md)** — 整体进展、框架架构、项目能力、版本迭代、待办事项一览
+- **🧊 FCF 自由现金流策略**：中证800成分池，TTM 口径，多版本选股与回测（主力方向）
+- **🔥 红利策略体系**：800红利 / 红利低波100 / H30269低波50 复现与增强
+- **📊 SP500 风格指数**：宽基增强，NI+FCF双正 + D'Hondt行业平衡 + 自由流通市值加权
+- **📈 交易执行研究**：网格买入、定投择时、ETF估值对比
 
 ---
 
-## FCF 自由现金流策略
+## ★ FCF 自由现金流策略（主力）
 
-基于 FCF=OCF-Capex、EV加权、TTM口径的量化选股与回测系统，覆盖中证800（ZZ800）和沪深300（HS300）两个成分池。
+基于 `FCF = OCF - Capex`、EV 加权、TTM 口径的量化选股系统，覆盖中证800（ZZ800）成分池。
 
-### 最新回测结果（ZZ800, 2015-03→2026-06, 45期）
+### 最新回测结果（ZZ800，2015-03→2026-06，45期）
 
-| 版本 | 年化 | 最大回撤 | 夏普 | 期末NAV | 说明 |
-|------|------|----------|------|---------|------|
-| **E版** | **15.80%** | -39.66% | **0.536** | 5.21x | ±40%缓冲，最优版本 |
-| D版 | 15.34% | -39.47% | 0.517 | 4.98x | ±20%缓冲 |
-| B版 | 14.80% | -39.99% | 0.504 | 4.72x | ±0%缓冲，Top50精选 |
-| F版 | 15.11% | -39.73% | 0.515 | 4.87x | ±50%缓冲 |
-| X版 | 10.12% | -40.82% | 0.356 | 2.96x | 全成分FCF加权 |
-| 932368 | 11.19% | -39.90% | 0.358 | 3.30x | 官方基准 |
+| 版本 | 年化 | 最大回撤 | 夏普 | 换手率 | 期末NAV | 说明 |
+|------|------|----------|------|--------|---------|------|
+| **I版** | **17.01%** | -38.97% | — | 32.7% | — | 二维质量过滤（PQ+OCF/利润>1.0），**年化最优** |
+| **E版** | **15.80%** | -39.66% | **0.536** | 23.1% | 5.21x | ±40%缓冲，**夏普/NAV最优** |
+| G版 | ~18.38% | — | — | — | — | 自适应TopN，**Calmar最优** |
+| H版 | 对比中 | — | — | — | — | FCF绝对值排序Top50 |
+| D版 | 15.34% | -39.47% | 0.517 | 25.5% | 4.98x | ±20%缓冲 |
+| F版 | 15.11% | -39.73% | 0.515 | 22.0% | 4.87x | ±50%缓冲 |
+| B版 | 14.80% | -39.99% | 0.504 | 31.4% | 4.72x | ±0%缓冲，纯排名 |
+| X版 | 10.12% | -40.82% | 0.356 | — | 2.96x | 全成分FCF加权（Smart Beta） |
+| 932368 | 11.19% | -39.90% | 0.358 | — | 3.30x | 中证800现金流官方指数 |
 
-### 七版策略架构
+### 各版本定位
 
-| 版本 | 缓冲区 | 选股方式 | 定位 |
-|------|--------|----------|------|
-| X版 | — | 全成分FCF加权 | FCF因子纯暴露（Smart Beta） |
-| B版 | ±0% | Top50 | 纯FCF率排名精选 |
-| D版 | ±20% | Top50（缓冲区） | 减少换手，保留上期持仓 |
-| E版 | ±40% | Top50（缓冲区） | 最优，换手率23.1% |
-| F版 | ±50% | Top50（缓冲区） | 最大缓冲，换手率22.0% |
-| G版 | 自适应 | 动态TopN | 年化18.38%, Calmar最优 |
-| H版 | — | FCF绝对值排序Top50 | 验证排序方式差异 |
-
-### 核心文档索引
-
-| 文档 | 说明 |
-|------|------|
-| **[项目进展追踪](docs/project_progress_fcf_strategy.md)** | 整体进展、框架、能力、版本迭代、待办事项 |
-| [B/D/E/F/X 五版对比报告](docs/zz800_bdefx_strategy_comparison.md) | 主报告：核心指标+逐年+逐期+超额+X版专项 |
-| [七版对比报告](docs/zz800_bdefgxh_strategy_comparison.md) | 含G/H版扩展对比 |
-| [D/B版全面对比](docs/zz800_fcf_full_comparison.md) | vs 多基准详细对比 |
-| [B版复盘](docs/zz800_b_version_review.md) | 53.5%胜率、1.54盈亏比 |
-| [E版持仓分析](docs/zz800_e_holdings_return_analysis.md) | 2250条个股-期收益分布、板块归因、历史暴雷率 |
-| [季度持仓分析模板](analysis/quarterly_holdings_analysis.py) | 一键分析任意版本+任意调仓日的板块分布与归因 |
-| [HS300 FCF对比框架](docs/hs300_fcf_vs_932366_comparison_framework.md) | vs 932366官方指数 |
-| [数据诊断](docs/zz800_fcf_data_diagnostic.md) | 数据覆盖率与质量 |
-| [932368验证](docs/932368_validation_report.md) | 官方指数交叉验证 |
+| 版本 | 缓冲区 | 选股方式 | 当前年化 | 备注 |
+|------|--------|----------|---------|------|
+| **I版** | ±40% | PQ+OCF/利润>1.0双过滤，Top50 | 17.01% | ✅ 年化最优 |
+| **E版** | ±40% | Top50（必选30+缓冲20） | 15.80% | ✅ 夏普/NAV最优 |
+| G版 | 自适应 | 动态TopN | ~18.38% | ✅ Calmar最优 |
+| H版 | — | FCF绝对值Top50 | 对比中 | ✅ 已验证 |
+| D版 | ±20% | Top50（必选40+缓冲10） | 15.34% | ✅ |
+| F版 | ±50% | Top50（必选25+缓冲25） | 15.11% | ✅ |
+| B版 | ±0% | Top50纯排名 | 14.80% | ✅ |
+| X版 | — | 全成分FCF加权 | 10.12% | ✅ Smart Beta基线 |
 
 ### 快速运行
 
 ```bash
-# 完整五版回测（选股→NAV→报告）
+# FCF 五版完整回测（B/D/E/F/X）
 python run_bdefx_full.py
 
-# 仅X版选股（保存排名池）
-python run_bdefx_full.py --x-only
-
-# 跳过选股，用已有数据算NAV+报告
+# 仅重算NAV（跳过选股，用已有数据）
 python run_bdefx_full.py --nav-only
+
+# I版（二维质量过滤）★ 年化最优
+python run_i_full.py
 
 # G版（自适应TopN）
 python run_g_full.py
 
 # H版（FCF绝对值排序）
 python run_h_full.py
-```
 
-### 季度持仓分析工具
-
-```bash
-# 任意版本 + 任意调仓日，一键输出四维分析
+# 季度持仓板块归因分析
 python analysis/quarterly_holdings_analysis.py E 2026-03-16
-python analysis/quarterly_holdings_analysis.py X 2025-12-15
-python analysis/quarterly_holdings_analysis.py B 2024-06-17
-```
-
-**四部分输出：**
-
-| 部分 | 内容 | 说明 |
-|------|------|------|
-| **一、板块权重** | 策略 vs HS300 权重对比 | 🔥🔥 超配 / ❄️❄️ 低配标注 |
-| **二、本期收益** | 逐板块收益 & 贡献 | 右侧对照 HS300 同期表现 |
-| **三、差异归因** | 不持有板块错失 + 持有板块选股拖累 | 自动识别四大天然排除板块 |
-| **四、历史分位** | 可比口径排名 + 历史类似大跌 | HS300 全收益日线 + 调仓日期序列 |
-
-**关键设计：**
-
-- 自动识别策略不持有板块（电子/通信/银行/非银），计算剔除后的 HS300 可比收益
-- 申万行业 90+ 种自动归并为 30 个一级板块
-- 历史分位基于 HS300 全收益日线 + 46 期调仓日期序列
-- 支持 B/D/E/F/X 全部版本
-
-**典型输出示例（E版 2026-03-16）：**
-
-```
-E版总收益: -14.91%  |  HS300总收益: +3.44%
-HS300去掉4板块后: -9.93%  (vs E版差距 -5.0pp)
-可比口径历史分位: 最差的 5%（仅2期更差）
-
-E版完全不持有的板块收益:
-  通信: +5.04pp | 电子: +5.25pp  ← 错过的科技涨势
-
-共有板块E版额外拖累:
-  汽车: E版-19.7% vs HS300-8.7% → 额外-1.7pp
-  有色: E版-23.4% vs HS300-13.7% → 额外-0.9pp
 ```
 
 ---
 
-## 红利周期投资 — 周度量化评估系统
+## ★ 红利策略体系
+
+### 策略矩阵
+
+| 策略 | 选股方式 | 年化 | 最大回撤 | 调仓 | 备注 |
+|------|----------|------|----------|------|------|
+| **红利低波100 (930955)** | 股息率×波动率排名 Top100 | **11.31%** | -30.77% | 季度 | ✅ 复现成功 |
+| **H30269 低波50** | DPS增长+波动率 Top50 | **8.95%** | — | 半年 | ✅ ≈官方8.65% |
+| **800红利 (931644)** | 三年股息率 Top100 | **5.93%** | -15.23% | 半年 | ✅ 防御性最强 |
+| 800红利+FCF过滤 | 三年股息率+FCF(TTM)>0 | 4.72% | -16.54% | 半年 | ❌ 不采纳 |
+| 红利+回购增强 | 股东回报率替代股息率 | 5.14% | — | 半年 | ❌ 暂存 |
+
+### 快速运行
+
+```bash
+# 800红利指数复现（931644）
+python run_800div_full.py
+
+# 红利低波100复现（930955）
+python run_dividend_lowvol.py
+
+# H30269红利低波50复现
+python run_h30269_full.py
+
+# 800红利+FCF过滤实验
+python run_800div_fcf_filter.py
+
+# 红利+回购增强版
+python run_800div_buyback.py
+```
+
+---
+
+## ★ SP500 风格指数
+
+基于沪深300成分池，仿标普500风格指数的宽基增强策略。
+
+| 版本 | 方案 | 年化 | 回撤 | 区间 | 备注 |
+|------|------|------|------|------|------|
+| v6 Top200 | NI+FCF双正+D'Hondt+自由流通市值加权 | **11.42%** | — | 2013-2026 | ✅ 全区间最优 |
+| v6 Top100 | 同上，Top100 | 9.07% | -35.60% | 2015-2026 | ✅ |
+
+```bash
+python run_sp500_style.py
+```
+
+---
+
+## ★ 交易执行研究
+
+```bash
+# 网格买入算法（515180，23种参数对比）
+python run_grid_research.py
+
+# 大额买入择时分析（300万场景）
+python analyze_entry_timing.py
+
+# PE估值三算法对比（加权/等权/均值）
+python quick_val_weighted.py
+
+# ETF月度定投IRR计算器
+python fund_dca_calc.py --code 515180.SH --start 2020-01-01 --monthly 10000
+```
+
+---
 
 ## 项目结构
 
 ```
 weekly_harness/
-├── run_bdefx_full.py      # ★ FCF五版回测主入口（B/D/E/F/X）
-├── run_g_full.py           # G版（自适应TopN）回测
-├── run_h_full.py           # H版（FCF绝对值排序）回测
-├── run_weekly.py           # 周度评估入口
-├── run_backtest.py         # 红利策略回测入口
-├── weekly_harness/
-│   ├── fcf_universe.py     # ★ FCF选股核心引擎（1605行）
-│   ├── strategy.py         # 红利周期轮动策略
-│   ├── scanner.py          # 红利股扫描器
-│   ├── backtest.py         # 回测引擎
-│   ├── portfolio.py        # 持仓管理
-│   ├── generator.py        # 数据拉取+评分计算
-│   ├── validator.py        # 数据质量校验
-│   └── reporter.py         # 周报生成
+├── ★ FCF策略入口
+├── run_bdefx_full.py          # FCF五版回测主入口（B/D/E/F/X）
+├── run_i_full.py              # I版（二维质量过滤）★ 年化17.01%
+├── run_g_full.py              # G版（自适应TopN）
+├── run_h_full.py              # H版（FCF绝对值排序）
+│
+├── ★ 红利策略入口
+├── run_800div_full.py         # 800红利指数复现（931644）
+├── run_800div_buyback.py      # 800红利+回购增强版
+├── run_dividend_lowvol.py     # 红利低波100复现（930955）
+├── run_h30269_full.py         # H30269红利低波50复现
+├── run_800div_fcf_filter.py   # 800红利+FCF过滤实验
+│
+├── ★ SP500风格
+├── run_sp500_style.py         # SP500风格指数（D'Hondt行业平衡）
+│
+├── ★ 执行研究
+├── run_grid_research.py       # 网格买入算法
+├── analyze_entry_timing.py    # 大额买入择时
+├── quick_val_weighted.py      # PE估值三算法对比
+├── fund_dca_calc.py           # ETF定投IRR计算器
+│
+├── weekly_harness/            # 核心引擎包
+│   ├── fcf_universe.py        # ★★ FCF选股核心引擎
+│   ├── dividend_universe.py   # 800红利选股引擎
+│   ├── dividend_lowvol.py     # 红利低波引擎
+│   ├── dividend_h30269.py     # H30269低波50引擎
+│   ├── dividend_buyback.py    # 红利+回购增强引擎
+│   ├── sp500_style.py         # SP500风格指数引擎
+│   ├── backtest.py            # 回测引擎
+│   ├── reporter.py            # 报告生成
+│   ├── portfolio.py           # 持仓管理
+│   └── ...
+│
+├── strategies/                # 策略YAML配置（16个版本）
+│   ├── zz800_fcf/             # E版（当前最优）
+│   ├── zz800_fcf_2d_quality/  # I版（二维质量过滤）
+│   ├── sp500_style/           # SP500风格
+│   ├── 800div/                # 800红利
+│   ├── div_lowvol_100/        # 红利低波100
+│   └── h30269_lowvol/         # H30269低波50
+│
 ├── analysis/
-│   ├── fund_tracker.py     # 基金/指数/策略净值跟踪
-│   ├── tracker_config.py   # 跟踪标的配置（16只）
-│   ├── index_backtest.py   # 指数回测对比
-│   └── quarterly_holdings_analysis.py  # ★ 季度持仓板块分析模板
-├── docs/                    # ★ 报告文档（保留在git中）
-│   ├── project_progress_fcf_strategy.md  # 项目进展追踪
-│   ├── zz800_bdefx_strategy_comparison.md # FCF五版主报告
-│   └── ...                  # 详见 docs/ 目录
-├── data/                    # 数据目录（.gitignore排除）
-├── cache/                   # 实验缓存（.gitignore排除）
-└── output/                  # 回测输出（.gitignore排除）
+│   ├── quarterly_holdings_analysis.py  # 季度持仓板块归因
+│   ├── fund_tracker.py                 # 基金/策略净值跟踪
+│   └── tracker_config.py               # 跟踪标的配置
+│
+├── docs/                     # ★ 所有报告（git追踪）
+├── data/                     # 数据缓存（.gitignore排除）
+├── output/                   # 回测输出（.gitignore排除）
+└── tests/                    # 单元测试
 ```
+
+---
+
+## 基金 & 指数跟踪工具
+
+```bash
+# 快照：所有标的多区间收益 + 最大回撤 + 夏普
+python analysis/fund_tracker.py
+
+# 周报 / 月报 / 季报
+python analysis/fund_tracker.py --mode weekly
+python analysis/fund_tracker.py --mode monthly
+python analysis/fund_tracker.py --mode quarter
+```
+
+当前跟踪 **16 只标的**：自建 FCF 策略 B/D/E/F 版、国证/中证现金流指数、现金流 ETF、红利 ETF、沪深300/中证500/中证1000 全收益。
+
+---
+
+## 核心文档索引
+
+| 文档 | 说明 |
+|------|------|
+| [CLAUDE.md](CLAUDE.md) | 项目指南 & Agent 操作手册 |
+| [研究日志](docs/research_log.md) | 所有实验记录（按时间排列） |
+| [FCF五版对比](docs/zz800_bdefx_strategy_comparison.md) | B/D/E/F/X 核心指标对比 |
+| [800红利复现](docs/2026-06-11_800红利指数复现.md) | 931644 复现回测报告 |
+| [红利低波100](docs/2026-06-13_红利低波100回测报告.md) | 930955 复现回测报告 |
+| [H30269复现](docs/2026-06-14_H30269红利低波50回测报告.md) | H30269 官方复现报告 |
+| [SP500风格](docs/2026-06-10_sp500_style_300_report.md) | SP500风格指数报告 |
+| [FCF过滤实验](docs/2026-06-16_800红利FCF过滤实验.md) | 800红利+FCF过滤（不采纳） |
+| [季度持仓分析](analysis/quarterly_holdings_analysis.py) | 一键分析任意版本+任意调仓日 |
+
+---
 
 ## 快速开始
 
@@ -156,188 +231,17 @@ pip install -r requirements.txt
 cp .env.example .env
 # 编辑 .env，填入 TUSHARE_TOKEN
 
-# 3. 运行周度评估
-python run_weekly.py
-
-# 4. 生成当季调仓计划
-python run_backtest.py --plan-only
-
-# 5. 运行策略回测（默认季度调仓）
-python run_backtest.py --start 2024-01-01 --end 2026-05-01
-
-# 6. 周度调仓回测
-python run_backtest.py --start 2024-01-01 --freq weekly
+# 3. 运行 FCF 主回测
+python run_bdefx_full.py
 ```
 
 ---
 
-## 基金 & 指数跟踪工具
+## 关键约定
 
-> 文件：`analysis/fund_tracker.py`  
-> 配置：`analysis/tracker_config.py`（在此添加/删除跟踪标的）  
-> 报告输出：`docs/tracker/{mode}_{date}.md`
-
-### 快速使用
-
-```bash
-# 快照：所有标的多区间收益 + 最大回撤 + 夏普（默认截至今天）
-python analysis/fund_tracker.py
-
-# 周报：快照 + 近4周逐周涨跌
-python analysis/fund_tracker.py --mode weekly
-
-# 月报：快照 + 近12月逐月涨跌
-python analysis/fund_tracker.py --mode monthly
-
-# 季报：快照 + 全部 ETF 最新季末持仓 Top10
-python analysis/fund_tracker.py --mode quarter
-
-# 指定截止日期（回溯历史）
-python analysis/fund_tracker.py --mode quarter --end 20251231
-
-# 仅打印，不保存文件
-python analysis/fund_tracker.py --no-save
-```
-
-### 当前跟踪标的（16 只）
-
-| 分类 | 代码 | 名称 | 备注 |
-|------|------|------|------|
-| 自建FCF策略 | MY_B/D/E/F | 自建ZZ800 FCF B/D/E/F版 | 季度节点，线性插值估算短周期 |
-| 现金流指数 | 980092.CNI | 国证自由现金流（价格） | +股息补偿 |
-| 现金流指数 | 480092.CNI | 国证FCF全收益 | 官方全收益 |
-| 现金流指数 | 932368.CSI | 中证800现金流（价格） | +股息补偿 |
-| 现金流指数 | 932365.CSI | 中证全指现金流（价格） | +股息补偿 |
-| 现金流ETF | 159229.SZ | 中证800现金流ETF | 华夏 |
-| 现金流ETF | 159201.SZ | 自由现金流ETF | 华夏，跟踪国证 |
-| 红利指数 | H00922.CSI | 中证红利全收益 | 官方全收益，无估算误差 |
-| 红利ETF | 515180.SH | 红利ETF | 易方达 |
-| 红利ETF | 510880.SH | 红利ETF | 华泰柏瑞 |
-| 红利ETF | 563020.SH | 红利低波ETF | 易方达，跟踪中证红利低波动指数 |
-| 宽基基准 | H00300.CSI | 沪深300全收益 ▶ | 基准 |
-| 宽基基准 | H00905.CSI | 中证500全收益 ▶ | 基准 |
-| 宽基基准 | H00852.CSI | 中证1000全收益 ▶ | 基准 |
-
-### 报告说明
-
-- **快照区间**：1W / 1M / 3M / 6M / YTD / 1Y / 3Y
-- **自建策略**：季度节点之间用**线性插值**估算短周期收益；最大回撤/夏普/波动基于前向填充的日序列
-- **注意**：高股息价格指数 + 估算股息在短周期（≤3M）可能因年末一次性补偿产生时序误差，建议以全收益指数版本为准
-
-### 新增跟踪标的
-
-编辑 `analysis/tracker_config.py`，在 `WATCHLIST` 列表中追加：
-
-```python
-{
-    "code":      "XXXXXX.SH",          # Tushare 代码
-    "name":      "自定义名称",
-    "category":  "分类标签",
-    "type":      "etf",                # etf / index_tr / index_price / strategy
-    "benchmark": False,
-}
-```
-
----
-
-## 自动化（cron）
-
-每周五 16:30 收盘后自动运行：
-
-```cron
-30 16 * * 5 cd /Users/luzilong/Work/weekly_harness && python run_weekly.py >> logs/weekly.log 2>&1
-```
-
-## Harness 框架
-
-```
-Planner → Generator → Validator → Reporter
-```
-
-- **Planner**：确定本周评估股票范围，获取10年国债收益率
-- **Generator**：调用 tushare 拉取数据，运行红利周期评分模型
-- **Validator**：校验数据质量，标注置信度（high/medium/low）
-- **Reporter**：与历史对比，检测信号变化，生成 Markdown 周报 + 图表
-
-## 评估标准
-
-| 信号 | 分数 | 含义 |
-|------|------|------|
-| 🔥 大胆攒股 | ≥80 | 黄金坑，底仓+逢跌加仓 |
-| ✅ 积极布局 | ≥65 | 性价比高，建3-4成底仓 |
-| 👀 观察等待 | ≥50 | 有吸引力但未到极佳买点 |
-| ⏸️ 暂缓 | ≥35 | 估值偏高或不确定性大 |
-| 🚫 回避 | <35 | 不符合红利周期投资标准 |
-
-## 红利周期轮动策略
-
-### 策略规则
-
-评分 → 目标仓位映射：
-
-| 评分区间 | 信号 | 单标的权重 |
-|---------|------|----------|
-| ≥80 | 🔥 大胆攒股 | 15% |
-| 65-79 | ✅ 积极布局 | 10% |
-| 50-64 | 👀 观察等待 | 5% |
-| <50 | ⏸️/🚫 | 0%（清仓） |
-
-### 类别权重上限
-
-| 类别 | 权重上限 | 说明 |
-|------|---------|------|
-| 弱周期红利 | 40% | 核心底仓 |
-| 消费成长红利 | 25% | 成长补充 |
-| 周期资源红利 | 20% | 周期博弈 |
-| ETF红利 | 15% | 分散配置 |
-
-### 风控约束
-
-- 单标的硬上限：20%
-- 最大持仓数：12只
-- 最低现金保留：5%
-- 调仓阈值：权重偏离>2%触发
-
-### 回测参数
-
-```bash
-# 默认参数（季度调仓）
-python run_backtest.py --start 2024-01-01
-
-# 周度调仓
-python run_backtest.py --start 2024-01-01 --freq weekly
-
-# 自定义仓位
-python run_backtest.py --max-weight 12 --mid-weight 8 --min-weight 3
-
-# 调整费率
-python run_backtest.py --commission 0.15 --slippage 0.05
-```
-
-回测输出：
-- 年化收益率、最大回撤、夏普比率、卡尔玛比率
-- 与沪深300 + 红利ETF双基准对比
-- 净值曲线 + 交易明细
-- `data/backtest/` 目录下完整报告
-
-## 核心修正记录
-
-### 回测引擎修正（v2）
-
-| # | 问题 | 修正 | 影响 |
-|---|------|------|------|
-| 1 | S2 BP单位错误：`spread_bp` 存的是百分比点（3.59），但后续按基点处理 | 乘以100转为真实基点，线性评分改为分级表对齐 `dividend_evaluator` | 美的等价差股S2评分偏差达24.6分 |
-| 2 | 回测无回购数据，大量回购的股票等效分红被低估 | 新增9只股票历史回购收益率，S1/S3使用 `effective_yield`（现金+回购） | 美的回购收益率~2%，等效股息率显著提升 |
-| 3 | 特别分红被计入TTM，茅台2022/2023特别分红导致股息率虚高至5.17% | 过滤 `end_date` 非标准财报期（0331/0630/0930/1231）的分红 | 茅台不再被误判为高股息标的 |
-| 4 | TTM滚动窗口6月同时纳入两年年报，股息率翻倍虚高 | 改为最近完整年度DPS：按 `end_date` 自然年度归组取已除权的最近年度分红之和 | 与周报"全年分红/股价"逻辑一致 |
-
-### 策略增强
-
-| # | 特性 | 说明 |
-|---|------|------|
-| 5 | 多基准对比 | 默认沪深300+红利ETF(515180)双基准 |
-| 6 | 行业对冲约束 | 煤炭↔火电、银行↔保险、石油↔化工，持有A时配对B至少配A的50%权重 |
-| 7 | 火电行业 | 新增华能/华电，buy=4.5%/full=6.5%，作为煤炭对冲标的 |
-| 8 | 行业生命周期标注 | 成熟/成长/夕阳转奶牛分类，资本开支趋势+分红潜力评估 |
-| 9 | 市场环境章节 | 周报新增板块轮动信号、牛熊周期、综合仓位建议 |
-| 10 | 分红奶牛信号 | 个股卡片新增🐄强/中/弱信号，对冲提示支持双向查找 |
+- **数据来源**：Tushare Pro（本地缓存优先，零 API 重算）
+- **回测区间**：2015-03 → 当前（保持历史一致性）
+- **调仓频率**：FCF 策略季度调仓（3/6/9/12月），红利策略半年度调仓（6/12月）
+- **禁止前视偏差**：成分股使用回测起点的实时成分，剔除回测起点后上市的标的
+- **报告归档**：所有实验生成 `docs/{日期}_{描述}.md` 并追加 `research_log.md`
+- **禁止修改**：`data/` 下缓存文件、已有策略版本核心逻辑、`docs/` 下已有报告
