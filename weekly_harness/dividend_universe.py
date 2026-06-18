@@ -42,6 +42,36 @@ _IDX_DIR = _DATA_DIR / "index_weights"
 _PRICE_DIR = _DATA_DIR / "price_snapshots"  # 历史价格本地缓存（一次下载，永不复用 API）
 
 
+def _build_lookup_index(df: Optional[pd.DataFrame], multi: bool = False) -> Optional[Dict]:
+    """构建快速查找索引 {(ts_code, end_date8): row_or_list}"""
+    if df is None or df.empty:
+        return None
+    idx: Dict = {}
+    for _, row in df.iterrows():
+        key = (str(row["ts_code"]), str(row["end_date"])[:8])
+        if multi:
+            idx.setdefault(key, []).append(row)
+        else:
+            if key not in idx or str(row.get("ann_date", "")) > str(idx[key].get("ann_date", "")):
+                idx[key] = row
+    return idx
+
+
+def _lookup_row(index: Optional[Dict], ts_code: str, period8: str,
+                latest: bool = True) -> Optional[pd.Series]:
+    """从索引中查找一行数据"""
+    if index is None:
+        return None
+    val = index.get((ts_code, period8))
+    if val is None:
+        return None
+    if isinstance(val, list):
+        if not val:
+            return None
+        return sorted(val, key=lambda r: str(r.get("ann_date", "")))[-1] if latest else val[0]
+    return val
+
+
 def _get_tushare_api():
     sys.path.insert(0, str(_PROJECT_ROOT))
     from dotenv import load_dotenv
@@ -154,6 +184,13 @@ class DividendUniverse:
         self._income_index: Dict[str, Dict[int, Dict[str, float]]] = {}  # 预索引: {ts_code: {year: {n_income_attr_p, basic_eps}}}
         self._stock_info_map: Dict[str, Dict] = {}  # 预构建: {ts_code: {name, industry, ...}}
         self._price_cache: Dict[str, Dict[str, float]] = {}  # {"BATCH|YYYY-MM-DD": {ts_code: close}}
+        # ── 现金流数据（用于 FCF TTM 过滤）──
+        self._cf_annual: Optional[pd.DataFrame] = None   # 年报现金流
+        self._cf_quarterly: Optional[pd.DataFrame] = None # 季度现金流
+        self._cf_annual_idx: Optional[Dict] = None
+        self._cf_quarterly_idx: Optional[Dict] = None
+        self._cf_loaded: bool = False
+
         self._preloaded = False  # 仿 FCF 的 _preloaded 模式，防止重复加载
 
     # ─── Data Loading ───────────────────────────────────────
@@ -185,10 +222,14 @@ class DividendUniverse:
         # 4. Income data: load from cached CSV files
         self._load_income_cache()
 
+        # 5. Cashflow data: load from cached CSV files (for FCF TTM filter)
+        self._load_cashflow_cache()
+
         print(f"  📂 分红数据: {len(self._dps_by_year)}只有数据")
         print(f"  📂 净利润数据: {'已加载' if self._income_loaded else '未加载'}")
+        print(f"  📂 现金流数据: {'已加载' if self._cf_loaded else '未加载'}")
 
-        # 5. 预加载历史价格（所有调仓日 + 需要的年末/年中价格）
+        # 6. 预加载历史价格（所有调仓日 + 需要的年末/年中价格）
         if rebalance_dates:
             self._preload_prices(rebalance_dates)
 
@@ -383,6 +424,206 @@ class DividendUniverse:
                 index.setdefault(str(ts_code), {})[int(yr)] = entry
         self._income_index = index
         print(f"  📂 Income索引: {len(index)}只, {sum(len(v) for v in index.values())}条年度记录")
+
+    # ─── Cashflow Loading (for FCF TTM filter) ──────────────
+
+    def _load_cashflow_cache(self):
+        """从本地CSV加载年报+季度现金流数据，构建O(1)查找索引。
+
+        数据格式：cashflow_YYYY.csv (年报), cashflow_YYYYQX.csv (季度)
+        关键字段：n_cashflow_act (经营CF), c_pay_acq_const_fiolta (资本支出)
+        """
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+        # ── 年报数据 ──
+        cf_dfs = []
+        for year in range(2013, 2027):
+            p = _FCF_DIR / f"cashflow_{year}.csv"
+            if p.exists():
+                try:
+                    df = pd.read_csv(p, dtype={
+                        "ts_code": str, "ann_date": str,
+                        "end_date": str, "f_ann_date": str
+                    })
+                    df["n_cashflow_act"] = pd.to_numeric(df["n_cashflow_act"], errors="coerce")
+                    df["c_pay_acq_const_fiolta"] = pd.to_numeric(df["c_pay_acq_const_fiolta"], errors="coerce")
+                    # 预转换 end_date 为整数加速查找
+                    df["_end_date_int"] = df["end_date"].astype(str).str[:8].astype(int)
+                    cf_dfs.append(df)
+                except Exception:
+                    pass
+
+        if cf_dfs:
+            self._cf_annual = pd.concat(cf_dfs, ignore_index=True)
+            self._cf_annual_idx = _build_lookup_index(self._cf_annual)
+        else:
+            self._cf_annual = pd.DataFrame()
+            self._cf_annual_idx = None
+
+        # ── 季度数据 ──
+        cfq_dfs = []
+        for year in range(2013, 2027):
+            for q in ["Q1", "Q2", "Q3"]:
+                p = _FCF_DIR / f"cashflow_{year}{q}.csv"
+                if p.exists():
+                    try:
+                        df = pd.read_csv(p, dtype={
+                            "ts_code": str, "ann_date": str,
+                            "end_date": str, "f_ann_date": str
+                        })
+                        df["n_cashflow_act"] = pd.to_numeric(df["n_cashflow_act"], errors="coerce")
+                        df["c_pay_acq_const_fiolta"] = pd.to_numeric(df["c_pay_acq_const_fiolta"], errors="coerce")
+                        df["_end_date_int"] = df["end_date"].astype(str).str[:8].astype(int)
+                        cfq_dfs.append(df)
+                    except Exception:
+                        pass
+
+        if cfq_dfs:
+            self._cf_quarterly = pd.concat(cfq_dfs, ignore_index=True)
+            self._cf_quarterly_idx = _build_lookup_index(self._cf_quarterly, multi=True)
+        else:
+            self._cf_quarterly = pd.DataFrame()
+            self._cf_quarterly_idx = None
+
+        self._cf_loaded = len(self._cf_annual) > 0
+        if self._cf_loaded:
+            print(f"  📂 现金流缓存: 年报{len(self._cf_annual)}条, 季度{len(self._cf_quarterly)}条")
+
+    # ─── FCF TTM 计算与过滤 ─────────────────────────────────
+
+    def _get_ref_period(self, date_str: str) -> Tuple[str, int]:
+        """根据调仓日确定TTM参考报告期。
+
+        6月调仓 → 当年Q1 (0331)；12月调仓 → 当年Q3 (0930)
+        返回 (ref_period, ref_year)
+        """
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        m = dt.month
+        if 4 <= m <= 6:
+            return f"{dt.year}0331", dt.year
+        else:
+            return f"{dt.year}0930", dt.year
+
+    def _calc_fcf_ttm(self, ts_code: str, date_str: str) -> Optional[float]:
+        """
+        计算指定调仓日的最新 TTM 自由现金流。
+        
+        FCF_TTM = TTM_OCF - TTM_Capex
+        TTM 公式: 上年年报 - 上年同期 + 本年累计
+        
+        返回 None 表示数据不足无法计算。
+        """
+        if not self._cf_loaded:
+            return None
+
+        ref_period, ref_year = self._get_ref_period(date_str)
+        ref_month = int(ref_period[4:6])
+
+        # 年报直接返回
+        if ref_month == 12:
+            row = _lookup_row(self._cf_annual_idx, ts_code, ref_period)
+            if row is None and self._cf_annual is not None and not self._cf_annual.empty:
+                rows = self._cf_annual[
+                    (self._cf_annual["ts_code"] == ts_code)
+                    & (self._cf_annual["_end_date_int"] == int(ref_period))
+                ]
+                if not rows.empty:
+                    row = rows.sort_values("ann_date").iloc[-1]
+            if row is not None:
+                ocf = row.get("n_cashflow_act")
+                capex = row.get("c_pay_acq_const_fiolta")
+                if pd.notna(ocf) and pd.notna(capex):
+                    return float(ocf) - float(capex)
+            return None
+
+        prev_year = ref_year - 1
+        prev_period = f"{prev_year}{ref_period[4:]}"
+        prev_annual = f"{prev_year}1231"
+
+        # 从索引获取三个期间数据
+        cur_row = _lookup_row(self._cf_quarterly_idx, ts_code, ref_period)
+        prev_q_row = _lookup_row(self._cf_quarterly_idx, ts_code, prev_period)
+        prev_ann_row = _lookup_row(self._cf_annual_idx, ts_code, prev_annual)
+
+        # 回退到 DataFrame filter
+        if self._cf_quarterly is not None and not self._cf_quarterly.empty:
+            if cur_row is None:
+                rows = self._cf_quarterly[
+                    (self._cf_quarterly["ts_code"] == ts_code)
+                    & (self._cf_quarterly["_end_date_int"] == int(ref_period))
+                ]
+                if not rows.empty:
+                    cur_row = rows.sort_values("ann_date").iloc[-1]
+            if prev_q_row is None:
+                rows = self._cf_quarterly[
+                    (self._cf_quarterly["ts_code"] == ts_code)
+                    & (self._cf_quarterly["_end_date_int"] == int(prev_period))
+                ]
+                if not rows.empty:
+                    prev_q_row = rows.sort_values("ann_date").iloc[-1]
+
+        if self._cf_annual is not None and not self._cf_annual.empty and prev_ann_row is None:
+            rows = self._cf_annual[
+                (self._cf_annual["ts_code"] == ts_code)
+                & (self._cf_annual["_end_date_int"] == int(prev_annual))
+            ]
+            if not rows.empty:
+                prev_ann_row = rows.sort_values("ann_date").iloc[-1]
+
+        if cur_row is None or prev_ann_row is None or prev_q_row is None:
+            # 数据不全，无法计算TTM
+            return None
+
+        try:
+            ocf_cur = float(cur_row["n_cashflow_act"])
+            ocf_prev_q = float(prev_q_row["n_cashflow_act"])
+            ocf_prev_ann = float(prev_ann_row["n_cashflow_act"])
+            capex_cur = float(cur_row["c_pay_acq_const_fiolta"])
+            capex_prev_q = float(prev_q_row["c_pay_acq_const_fiolta"])
+            capex_prev_ann = float(prev_ann_row["c_pay_acq_const_fiolta"])
+
+            if not all(pd.notna(v) for v in [ocf_cur, ocf_prev_q, ocf_prev_ann,
+                                               capex_cur, capex_prev_q, capex_prev_ann]):
+                return None
+
+            ttm_ocf = ocf_prev_ann - ocf_prev_q + ocf_cur
+            ttm_capex = capex_prev_ann - capex_prev_q + capex_cur
+            return ttm_ocf - ttm_capex
+        except (ValueError, TypeError, KeyError):
+            return None
+
+    def _check_fcf_positive(self, ts_code: str, date_str: str) -> Optional[bool]:
+        """检查最近一年FCF(TTM)是否为正。
+
+        Returns:
+            True: FCF > 0
+            False: FCF <= 0
+            None: 数据不足，无法判断（上游保守通过）
+        """
+        fcf = self._calc_fcf_ttm(ts_code, date_str)
+        if fcf is not None:
+            return fcf > 0
+
+        # TTM数据不足 → 回退到最近年报
+        dt = datetime.strptime(date_str[:10], "%Y-%m-%d")
+        rep_year = dt.year - 1  # 最近完整会计年度
+
+        row = _lookup_row(self._cf_annual_idx, ts_code, f"{rep_year}1231")
+        if row is None and self._cf_annual is not None and not self._cf_annual.empty:
+            rows = self._cf_annual[
+                (self._cf_annual["ts_code"] == ts_code)
+                & (self._cf_annual["_end_date_int"] == int(f"{rep_year}1231"))
+            ]
+            if not rows.empty:
+                row = rows.sort_values("ann_date").iloc[-1]
+
+        if row is not None:
+            ocf = row.get("n_cashflow_act")
+            capex = row.get("c_pay_acq_const_fiolta")
+            if pd.notna(ocf) and pd.notna(capex):
+                return float(ocf) - float(capex) > 0
+
+        return None  # 年报也不可用，保守通过
 
     # ─── Stock Price Fetching ───────────────────────────────
 
@@ -664,6 +905,7 @@ class DividendUniverse:
         prev_basket_codes: Optional[Set[str]] = None,
         max_turnover: float = 0.20,
         verbose: bool = True,
+        enable_fcf_filter: bool = False,
     ) -> Dict[str, Dict]:
         """
         执行800红利指数选样逻辑。
@@ -675,6 +917,7 @@ class DividendUniverse:
         prev_basket_codes : 上期持仓代码集合（用于换手率限制）
         max_turnover : 最大换手率（默认20%）
         verbose : 是否打印进度
+        enable_fcf_filter : 是否启用"最近一年FCF(TTM)>0"过滤（默认False保持原始逻辑）
 
         Returns
         -------
@@ -688,9 +931,11 @@ class DividendUniverse:
         if not constituents:
             return {}
 
-        # Step 2: 筛选 — 连续三年分红 + 股利支付率检查
+        # Step 2: 筛选 — 连续三年分红 + FCF过滤(可选) + 股利支付率检查
         eligible = []
         n_no_div = 0
+        n_no_fcf = 0
+        n_fcf_missing = 0
         n_no_payout = 0
         n_no_price = 0
         n_no_data = 0
@@ -705,6 +950,16 @@ class DividendUniverse:
             if not self._check_consecutive_dividends(ts_code, date_str):
                 n_no_div += 1
                 continue
+
+            # 最近一年FCF(TTM)>0检查（可选）
+            if enable_fcf_filter:
+                fcf_ok = self._check_fcf_positive(ts_code, date_str)
+                if fcf_ok is None:
+                    # 数据不足，保守通过
+                    n_fcf_missing += 1
+                elif not fcf_ok:
+                    n_no_fcf += 1
+                    continue
 
             # 股利支付率检查
             if not self._check_payout_ratio(ts_code, date_str):
@@ -727,6 +982,8 @@ class DividendUniverse:
 
         if verbose:
             print(f"    连续分红过滤: 剔除{n_no_div}只")
+            if enable_fcf_filter:
+                print(f"    FCF(TTM)>0过滤: 剔除{n_no_fcf}只 (数据缺失{n_fcf_missing}只,保守通过)")
             print(f"    股利支付率过滤: 剔除{n_no_payout}只")
             print(f"    价格/股息率不可用: 剔除{n_no_price}只")
             print(f"    无分红数据: 剔除{n_no_data}只")
