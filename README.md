@@ -64,6 +64,37 @@ python analysis/quarterly_holdings_analysis.py E 2026-03-16
 
 ---
 
+## ★ 红利周期投资 — 周度评估
+
+基于「红利周期三层估值体系」的**实战攒股系统**，每周自动评估 38 只精选红利标的，输出买卖信号。
+
+```bash
+# 每周运行（四阶段 Harness 框架：Planner → Generator → Validator → Reporter）
+python run_weekly.py
+
+# 强制覆盖本周历史
+python run_weekly.py --force
+
+# 历史周次重跑
+python run_weekly.py --week 2026-W21
+```
+
+输出文件：
+- 周报 Markdown：`data/weekly_reports/{周次}/report.md`
+- 可视化图表：`data/weekly_reports/{周次}/chart.png`
+- 最新报告：`data/dividend_report.md`（自动同步）
+
+### 评估流程
+
+```
+Planner → Generator → Validator → Reporter
+   │           │            │            │
+  规划范围    拉取tushare   数据质量校验   生成周报+图表
+  国债利率    计算评分      置信度标注    信号变化检测
+```
+
+---
+
 ## ★ 红利策略体系
 
 ### 策略矩阵
@@ -134,6 +165,10 @@ python fund_dca_calc.py --code 515180.SH --start 2020-01-01 --monthly 10000
 
 ```
 weekly_harness/
+├── ★ 周度评估系统
+├── run_weekly.py              # 红利周期投资周度评估（四阶段 Harness）
+├── dividend_evaluator.py      # 企业量化评估引擎（三层估值体系）
+│
 ├── ★ FCF策略入口
 ├── run_bdefx_full.py          # FCF五版回测主入口（B/D/E/F/X）
 ├── run_i_full.py              # I版（二维质量过滤）★ 年化17.01%
@@ -164,8 +199,13 @@ weekly_harness/
 │   ├── dividend_buyback.py    # 红利+回购增强引擎
 │   ├── sp500_style.py         # SP500风格指数引擎
 │   ├── backtest.py            # 回测引擎
-│   ├── reporter.py            # 报告生成
-│   ├── portfolio.py           # 持仓管理
+│   ├── strategy.py            # 红利周期轮动策略
+│   ├── scanner.py             # A股红利潜力股扫描器
+│   ├── planner.py             # 周度评估规划器
+│   ├── generator.py           # 数据拉取+评分
+│   ├── validator.py           # 数据质量校验
+│   ├── reporter.py            # 周报生成
+│   ├── dca_planner.py         # 定投计划引擎
 │   └── ...
 │
 ├── strategies/                # 策略YAML配置（16个版本）
@@ -231,7 +271,10 @@ pip install -r requirements.txt
 cp .env.example .env
 # 编辑 .env，填入 TUSHARE_TOKEN
 
-# 3. 运行 FCF 主回测
+# 3. 运行周度评估（实战攒股）
+python run_weekly.py
+
+# 4. 运行 FCF 主回测
 python run_bdefx_full.py
 ```
 
