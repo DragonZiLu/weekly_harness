@@ -535,6 +535,158 @@ class WeeklyReporter:
 
     # ─── Markdown 周报 ────────────────────────────────────────
 
+    def _generate_sector_comparison_table(self, raw_scores: Dict, bond_yield: float) -> str:
+        """
+        生成行业息差水平 vs 21年牛末历史对比表
+
+        基于文章第六部分分析框架：
+          - 19-21年消费医药牛市末期各行业股息率（21年10年国债约3%）
+          - 当前各行业代表股票的股息率（10年国债约1.7%）
+          - 息差 = 股息率 - 10年国债，历史对比判断当前估值高低
+
+        数据来源：文章原文 + 系统当前评估结果
+        """
+        scores = raw_scores.get("scores", {})
+
+        # 21年牛末参考数据（来自文章原文）
+        # 格式: { 行业: { "dy_21": 21年股息率估算, "yield_21": 21年国债利率, "note": 说明 } }
+        SECTOR_2021_REF = {
+            "银行": {
+                "dy_21_4big": 7.0,   # 21年四大行股息率 7%+
+                "dy_21_cmb": 2.8,    # 21年招行（被抱团）股息率 <3%
+                "note": "21年四大行7%+、招行被抱团不到3%；22-24年四大行翻倍招行阴跌",
+            },
+            "水电": {
+                "dy_21": 4.5,
+                "note": "21年长电国投约4.5%，息差与当前接近",
+            },
+            "运营商": {
+                "dy_21": 4.0,
+                "note": "21年A股未上市，港股折算约4%",
+            },
+            "家电": {
+                "dy_21": 0.8,
+                "note": "21年家电被抱团，股息率<1%；当前5-7%，远超21年",
+            },
+            "白酒": {
+                "dy_21": 0.6,
+                "note": "21年茅台'3000不算高'时期，股息率0.3-0.8%；当前4-7%，极大反转",
+            },
+            "中药": {
+                "dy_21": 1.5,
+                "note": "21年医药白马被抱团，股息率1-2%；当前5-13%，大幅提升",
+            },
+            "煤炭": {
+                "dy_21": 10.0,
+                "note": "21年煤炭跌到10%+无人问津；当前4-5%，熊市护盘板块",
+            },
+            "石油": {
+                "dy_21": 8.0,
+                "note": "21年石油跌到8%+；当前4-5%，周期底部仍有吸引力",
+            },
+            "保险": {
+                "dy_21": 2.5,
+                "note": "21年保险综合金融约2-3%；当前5-6%，大幅提升",
+            },
+            "海运": {
+                "dy_21": 3.0,
+                "note": "21年集运周期低点约3%；当前7%，高于21年",
+            },
+        }
+
+        lines = ["\n---\n\n## 📐 行业息差水平：当前 vs 21年牛末横向对比\n"]
+        lines.append("> 参考框架：19-21年消费医药结构性牛市末期（10年国债≈3%）vs 当前（10年国债≈1.7%）\n")
+        lines.append(
+            "| 行业 | 21年代表股息率 | 21年国债 | 21年息差 | 当前代表股息率 | 当前国债 | 当前息差 | 对比判断 |"
+        )
+        lines.append("|------|--------------|---------|---------|--------------|---------|---------|---------|")
+
+        bond_21 = 3.0  # 21年10年国债利率约3%
+
+        # 从当前评分结果中按行业取代表性股息率（取中位数）
+        sector_current = {}
+        sector_ts_map = {
+            "银行": ["600036.SH", "601398.SH", "601288.SH", "601939.SH", "601988.SH"],
+            "水电": ["600900.SH", "600886.SH"],
+            "运营商": ["600941.SH", "601728.SH"],
+            "家电": ["000333.SZ", "600690.SH", "000651.SZ"],
+            "白酒": ["600519.SH", "000858.SZ", "000568.SZ"],
+            "中药": ["000538.SZ", "600329.SH", "000423.SZ"],
+            "煤炭": ["601225.SH", "601088.SH"],
+            "石油": ["600938.SH"],
+            "保险": ["601318.SH"],
+            "海运": ["601919.SH"],
+        }
+
+        for sector, ts_list in sector_ts_map.items():
+            dys = [scores[ts]["div_yield"] for ts in ts_list if ts in scores and scores[ts]["div_yield"] > 0]
+            if dys:
+                sector_current[sector] = round(sum(dys) / len(dys), 1)
+
+        for sector, ref in SECTOR_2021_REF.items():
+            curr_dy = sector_current.get(sector, 0)
+            if curr_dy == 0:
+                continue
+
+            curr_spread = curr_dy - bond_yield
+            curr_spread_bp = curr_spread * 100
+
+            if sector == "银行":
+                # 分开展示四大行和招行
+                dy_4big_21 = ref["dy_21_4big"]
+                spread_4big_21 = dy_4big_21 - bond_21
+                # 当前四大行（工农建中）
+                big4_codes = ["601398.SH", "601288.SH", "601939.SH", "601988.SH"]
+                big4_dy = [scores[ts]["div_yield"] for ts in big4_codes if ts in scores and scores[ts]["div_yield"] > 0]
+                curr_4big = round(sum(big4_dy) / len(big4_dy), 1) if big4_dy else 0
+
+                spread_curr = curr_4big - bond_yield
+                if spread_curr > spread_4big_21:
+                    judgment = "✅ 当前息差高于21年，性价比更佳"
+                elif spread_curr > spread_4big_21 * 0.7:
+                    judgment = "⚖️ 当前息差略低于21年，合理"
+                else:
+                    judgment = "⚠️ 当前息差显著低于21年，谨慎"
+
+                lines.append(
+                    f"| 四大行 | {dy_4big_21:.1f}% | {bond_21:.1f}% | {spread_4big_21*100:.0f}BP | "
+                    f"{curr_4big:.1f}% | {bond_yield:.2f}% | {spread_curr*100:.0f}BP | {judgment} |"
+                )
+
+                # 招行
+                cmb_dy_21 = ref["dy_21_cmb"]
+                cmb_spread_21 = cmb_dy_21 - bond_21
+                cmb_curr = scores.get("600036.SH", {}).get("div_yield", 0)
+                cmb_spread = cmb_curr - bond_yield
+                cmb_j = "✅ 当前息差远高于21年，性价比极佳" if cmb_spread > cmb_spread_21 * 2 else "⚖️ 对比21年有所改善"
+                lines.append(
+                    f"| 招行 | {cmb_dy_21:.1f}% | {bond_21:.1f}% | {cmb_spread_21*100:.0f}BP | "
+                    f"{cmb_curr:.1f}% | {bond_yield:.2f}% | {cmb_spread*100:.0f}BP | {cmb_j} |"
+                )
+            else:
+                dy_21 = ref.get("dy_21", 0)
+                if dy_21 == 0:
+                    continue
+                spread_21 = dy_21 - bond_21
+
+                if curr_spread > spread_21:
+                    judgment = "✅ 当前息差高于21年，性价比更佳"
+                elif curr_spread > spread_21 * 0.7:
+                    judgment = "⚖️ 当前息差略低于21年，合理"
+                else:
+                    judgment = "⚠️ 当前息差显著低于21年，谨慎"
+
+                lines.append(
+                    f"| {sector} | {dy_21:.1f}% | {bond_21:.1f}% | {spread_21*100:.0f}BP | "
+                    f"{curr_dy:.1f}% | {bond_yield:.2f}% | {curr_spread_bp:.0f}BP | {judgment} |"
+                )
+
+        lines.append("")
+        lines.append("> 说明：息差=股息率-10年国债利率。21年国债约3%，当前约1.7%，无风险利率下降本身提升了红利资产的相对吸引力。")
+        lines.append("> 当前息差高于21年 → 相对吸引力更强；低于21年 → 被抱团炒作或周期高位。\n")
+
+        return "\n".join(lines)
+
     def _generate_markdown(
         self,
         raw_scores: Dict,
@@ -576,7 +728,7 @@ class WeeklyReporter:
                 from weekly_harness.market_signals import MarketSignals
                 from config.settings import tushare_cfg
                 ms = MarketSignals(tushare_token=tushare_cfg.token)
-                market_signals = ms.get_all_signals()
+                market_signals = ms.get_all_signals(bond_yield=bond_yield)
             rotation = market_signals["rotation"]
             bullbear = market_signals["bullbear"]
             position_suggestion = market_signals["position_suggestion"]
@@ -627,6 +779,59 @@ class WeeklyReporter:
             pos_icons = {"加仓": "🟢", "减仓": "🔴", "谨慎加仓": "🟡", "谨慎减仓": "🟡", "正常": "⚪"}
             pos_icon = pos_icons.get(position_suggestion, "⚪")
             lines.append(f"> 🎯 **综合仓位建议**: {pos_icon} **{position_suggestion}**\n")
+
+            # ── ETF 定投信号 ──
+            etf_dca = market_signals.get("etf_dca_signals", {})
+            if etf_dca:
+                lines.append("### 📈 红利ETF定投信号\n")
+                lines.append("> 基于60周线/20月线偏离度 + 股息率水平，判断当前是否进入定投区间\n")
+                lines.append("| ETF | 当前价 | vs 60周线 | vs 20月线 | 股息率 | 息差BP | 📋 定投建议 |")
+                lines.append("|-----|--------|----------|----------|--------|--------|------------|")
+
+                action_icons = {
+                    "大力定投": "🔥",
+                    "加大定投": "📈",
+                    "开始定投": "✅",
+                    "持有":     "⏸️",
+                    "停止定投": "⚠️",
+                    "减仓":     "🔴",
+                }
+                for ts_code, dca in etf_dca.items():
+                    action = dca.get("dca_action", "?")
+                    icon = action_icons.get(action, "⚪")
+                    dev60 = dca.get("dev_60w", 0)
+                    dev20 = dca.get("dev_20m", 0)
+                    dev60_str = f"{dev60:+.1f}%" if dev60 != 0 else "N/A"
+                    dev20_str = f"{dev20:+.1f}%" if dev20 != 0 else "N/A"
+                    dy = dca.get("div_yield", 0)
+                    spread = dca.get("bond_spread_bp", 0)
+                    name = dca.get("etf_name", ts_code)
+                    price = dca.get("current_price", 0)
+                    lines.append(
+                        f"| **{name}** | {price:.3f} | {dev60_str} | {dev20_str} | "
+                        f"{dy:.2f}% | {spread:.0f} | {icon} **{action}** |"
+                    )
+
+                # 详细信号说明
+                for ts_code, dca in etf_dca.items():
+                    name = dca.get("etf_name", ts_code)
+                    action = dca.get("dca_action", "?")
+                    reason = dca.get("dca_reason", "")
+                    signals_list = dca.get("signals", [])
+                    ma60w = dca.get("ma60w", 0)
+                    ma20m = dca.get("ma20m", 0)
+                    if reason or signals_list:
+                        lines.append(f"\n**{name}** ({ts_code})")
+                        lines.append(f"- 60周线: {ma60w:.3f} | 20月线: {ma20m:.3f}")
+                        lines.append(f"- 操作建议: {action} — {reason}")
+                        for sig in signals_list:
+                            lines.append(f"  - {sig}")
+
+                lines.append("")
+                lines.append("> 💡 **策略说明**：跌破60周线开始定投，偏离-10%加大定投；"
+                             "股息率≥5%或息差≥400BP为强定投信号；"
+                             "高于60周线+10%停止定投，+15%减仓。\n")
+
             lines.append("---\n")
 
         except Exception as e:
@@ -742,6 +947,13 @@ class WeeklyReporter:
                 else:
                     # 个股展示
                     lines.append(f"| 股价 | {s['close']:.2f}元 | 来源: {s.get('source', '?')} |")
+                    # 除权后参考价（close - DPS，帮助判断除权后真实买点）
+                    dps_val = s.get('forward_dps', 0) or (s['close'] * s['div_yield'] / 100)
+                    if dps_val > 0:
+                        ex_div_price = s['close'] - dps_val
+                        # 除权后股息率会上升（价格降低但DPS不变）
+                        ex_div_yield = dps_val / ex_div_price * 100 if ex_div_price > 0 else 0
+                        lines.append(f"| 除权后参考价 | **{ex_div_price:.2f}元** | DPS约{dps_val:.2f}元，除权后股息率升至**{ex_div_yield:.2f}%** |")
                     lines.append(f"| PE | {s['pe_ttm']:.1f}x | |")
                     lines.append(f"| 股息率 | **{s['div_yield']:.2f}%** | S1={s['s1_div']}/30: {s.get('r1','')} |")
                     if s.get('forward_div_yield', 0) > 0:
@@ -875,6 +1087,9 @@ class WeeklyReporter:
                 )
         else:
             lines.append("\n\n> ✅ **自验证通过**：所有股票三源股息率一致，fallback 数据未发现明显过时。\n")
+
+        # ── 行业息差历史对比（当前 vs 21年牛末） ──
+        lines.append(self._generate_sector_comparison_table(raw_scores, bond_yield))
 
         lines.append(f"\n---\n\n> ⚠️ **免责声明**: 本报告仅供学习研究，不构成投资建议。\n")
         lines.append(f"*生成时间: {now_str} | 框架: 红利周期投资 + Harness 周期评估*")
@@ -1133,7 +1348,7 @@ class WeeklyReporter:
                 from weekly_harness.market_signals import MarketSignals
                 from config.settings import tushare_cfg
                 ms = MarketSignals(tushare_token=tushare_cfg.token)
-                market_signals = ms.get_all_signals()
+                market_signals = ms.get_all_signals(bond_yield=raw_scores.get("bond_yield_10y", 1.65))
             except Exception:
                 pass
 
@@ -1174,6 +1389,10 @@ class WeeklyReporter:
                 "confidence": b.confidence,
                 "reason": b.reason,
             }
+            # ETF 定投信号存档
+            etf_dca = market_signals.get("etf_dca_signals", {})
+            if etf_dca:
+                signals_data["etf_dca_signals"] = etf_dca
 
         if artifacts_dir:
             artifacts_dir.mkdir(parents=True, exist_ok=True)

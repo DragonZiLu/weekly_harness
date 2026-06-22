@@ -41,8 +41,8 @@ def _get_pro():
         token = os.environ.get("TUSHARE_TOKEN", "")
     if not token:
         raise ValueError("请配置 tushare token：config/settings.py 或环境变量 TUSHARE_TOKEN")
-    ts.set_token(token)
-    return ts.pro_api()
+    # 直接传 token 构造 pro_api，避免 set_token 写入 ~/tk.csv（sandbox 限制）
+    return ts.pro_api(token=token)
 
 
 # ══════════════════════════════════════════════════════

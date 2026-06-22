@@ -505,9 +505,13 @@ class Sp500StyleEngine:
             ttm = self._get_annual_profit(code, annual_year)
             if ttm is None:
                 ttm = self._get_annual_profit(code, annual_year - 1)
-                if ttm is None:
-                    return False, f"无{annual_year}年报数据"
-                annual_year -= 1
+            if ttm is None and date_str:
+                # ★ 年度数据缺失时，回退到季度滚动4季度（如银行/保险/石油等大市值股）
+                q_result = self._get_latest_quarterly_profit(code, date_str)
+                if q_result is not None:
+                    ttm = q_result[1]  # rolling_4q（连续四个季度累计归母净利润）
+            if ttm is None:
+                return False, f"无{annual_year}年报数据，且无季度数据"
             if ttm <= 0:
                 return False, f"TTM净利润={ttm/1e8:.2f}亿 ≤ 0"
 
@@ -701,10 +705,17 @@ class Sp500StyleEngine:
             if ok:
                 passed_profit.append(code)
                 # 获取利润值用于后续
+                # 优先年度数据，缺失时回退到季度滚动4季度（TTM）
                 annual_year = ref_year - 1 if ref_quarter <= 3 else ref_year
                 p = self._get_annual_profit(code, annual_year)
                 if p is None:
-                    p = self._get_annual_profit(code, annual_year - 1) or 0
+                    p = self._get_annual_profit(code, annual_year - 1)
+                if p is None and date_str:
+                    q_result = self._get_latest_quarterly_profit(code, date_str)
+                    if q_result is not None:
+                        p = q_result[1]  # rolling_4q（连续四个季度累计归母净利润）
+                if p is None:
+                    p = 0.0
                 profit_vals[code] = p
             elif reason:
                 failed_profit.append((code, reason))
@@ -778,28 +789,25 @@ class Sp500StyleEngine:
             industry_mv[ind] = sum(mv_data.get(c, {}).get("circ_mv", 0) for c in codes)
         total_industry_mv = sum(industry_mv.values())
 
-        # 4b: 按行业自由流通市值比例分配 slot（min=1 保护每个行业）
-        industry_slots: Dict[str, int] = {}
-        if total_industry_mv > 0:
-            remaining = target_n
-            for ind in sorted(industry_groups.keys()):
-                raw = (industry_mv[ind] / total_industry_mv) * target_n
-                slots = max(1, int(raw))
-                industry_slots[ind] = slots
-                remaining -= slots
-            fracs = [(industry_mv[ind]/total_industry_mv*target_n - industry_slots[ind], ind)
-                     for ind in industry_groups]
-            fracs.sort(reverse=True)
-            for i in range(min(remaining, len(fracs))):
-                industry_slots[fracs[i][1]] += 1
+        # 4b: D'Hondt 方法按自由流通市值比例分配 slot
+        # 保证每个行业至少 1 个 slot（当 target_n ≥ 行业数时），
+        # 大行业按市值比例获得更多 slot，避免超额分配和字母序截断
+        industry_slots: Dict[str, int] = {ind: 0 for ind in industry_groups}
+        if total_industry_mv > 0 and target_n > 0:
+            # D'Hondt/Jefferson 方法：逐 slot 分配给 mv/(slots+1) 最大的行业
+            for _ in range(target_n):
+                best_ind = max(industry_groups.keys(),
+                              key=lambda ind: industry_mv[ind] / (industry_slots[ind] + 1))
+                industry_slots[best_ind] += 1
         else:
             ni = len(industry_groups)
             for i, ind in enumerate(sorted(industry_groups.keys())):
                 industry_slots[ind] = target_n // ni + (1 if i < target_n % ni else 0)
 
-        # 4c: 行业内按流通市值排序选股
+        # 4c: 行业内按流通市值排序选股（按行业市值降序排列，大行业优先）
         selected: List[str] = []
-        for ind, slots in sorted(industry_slots.items()):
+        for ind, _ in sorted(industry_slots.items(), key=lambda x: -industry_mv.get(x[0], 0)):
+            slots = industry_slots[ind]
             codes_in = industry_groups.get(ind, [])
             codes_sorted = sorted(
                 codes_in,
@@ -818,8 +826,6 @@ class Sp500StyleEngine:
             )
             need = target_n - len(selected)
             selected.extend(remaining_codes[:need])
-
-        selected = selected[:target_n]
 
         if verbose:
             selected_industries = {}

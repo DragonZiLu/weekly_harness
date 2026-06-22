@@ -1,0 +1,42 @@
+# H30269 中证红利低波动指数（红利低波50）策略配置
+# 自动生成于 2026-06-14 12:07
+
+strategy:
+  name: "H30269 红利低波50"
+  index_code: "000906.SH"  # CSI 800
+  target_index: "H30269"
+  
+  selection:
+    sample_space: "CSI 800"
+    dividend_type: "tax_adjusted"  # 税后股息率
+    consecutive_years: 3
+    top_n_dividend: 75
+    top_n_volatility: 50
+    
+    filters:
+      - "连续3年税后分红"
+      - "支付率 >= 0 且 <= P95"
+      - "过去3年DPS增长率 > 0"
+  
+  weighting:
+    method: "dividend_yield_only"  # 纯股息率加权
+    single_cap: 0.15
+    industry_cap: null  # 无行业上限
+  
+  rebalancing:
+    frequency: "annual"
+    month: 12
+    rule: "第二个周五下一交易日"
+
+performance:
+  period: "2015-12-14 → 2024-12-16"
+  periods: 10
+  annual_return: 8.95%
+  max_drawdown: -13.61%
+  sharpe: 0.678
+  nav: 2.36x
+
+benchmarks:
+  - E版FCF (17.00%)" if m_e else "  - E版FCF (15.80%)"
+  - 930955 (9.29%)" if dl100_m else "  - 930955 (—)"
+  - 800红利 (9.65%)" if div800_m else "  - 800红利 (5.93%)"

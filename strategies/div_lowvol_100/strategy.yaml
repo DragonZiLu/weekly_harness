@@ -1,0 +1,164 @@
+# 中证红利低波动100指数（930955）复现策略
+name: zz800_dividend_lowvol
+version: "v1"
+baseline: false
+description: |
+  中证红利低波动100指数（930955）复现
+  选样：ZZ800成分股 → 连续3年分红 → 股息率Top300 → 波动率Top100
+  加权：股息率/波动率加权 + 单股10%封顶 + 行业20%上限
+  调仓：季度（3/6/9/12月），无换手限制
+
+# ──────────────────────────────────────
+# 样本空间
+# ──────────────────────────────────────
+universe:
+  index_code: "000906.SH"
+  index_name: "中证800"
+
+# ──────────────────────────────────────
+# 选股规则
+# ──────────────────────────────────────
+selection:
+  method: "dividend_yield_then_volatility_ranking"
+  target_n: 100
+  steps:
+    - step: 1
+      name: "成分股获取"
+      description: "按调仓日获取ZZ800实时成分股"
+    - step: 2
+      name: "连续分红过滤"
+      description: "过去三个完整会计年度每年均有现金分红(DPS>0)"
+    - step: 3
+      name: "股息率计算"
+      description: |
+        三年平均现金股息率 = AVG(股息率_i), i=1,2,3
+        股息率_i = DPS_i / 年末股价_i
+    - step: 4
+      name: "第一轮：股息率Top300"
+      description: "按三年平均股息率降序取Top300"
+    - step: 5
+      name: "第二论：波动率Top100"
+      description: |
+        从Top300中按过去一年波动率升序取Top100
+        波动率 = std(日pct_chg) × √244 × 100
+        数据不足60日则用默认值30%
+
+# ──────────────────────────────────────
+# 加权方式
+# ──────────────────────────────────────
+weighting:
+  method: "div_yield_div_volatility_weighted"
+  formula: "weight = (div_yield / vol) / Σ(div_yield / vol)"
+  single_stock_cap: 0.10
+  industry_cap: 0.20
+  industry_classification: "申万一级（代理中证二级）"
+  redistribution: "iterative"            # 超限部分迭代重分配
+
+# ──────────────────────────────────────
+# 调仓频率
+# ──────────────────────────────────────
+rebalance:
+  frequency: "quarterly"
+  months: [3, 6, 9, 12]
+  rule: "second_friday_next_tradeday"
+  no_turnover_limit: true
+
+# ──────────────────────────────────────
+# 回测统计
+# ──────────────────────────────────────
+backtest:
+  full:
+    period: "2015-03-16 → 2026-03-16"
+    periods: 45
+    annual_return: 11.31
+    max_drawdown: -30.77
+    sharpe: 0.470
+    calmar: 0.368
+    win_rate: 71.1
+    nav: 3.338
+  aligned_2016:
+    period: "2016-01 → 2026-03-16"
+    note: "剔除2015股灾，统一从2015-12-31=1.0起"
+    annual_return: 9.29
+    max_drawdown: -16.36
+    sharpe: 0.768
+    nav: 2.5
+
+# ──────────────────────────────────────
+# 对比基准
+# ──────────────────────────────────────
+benchmarks:
+  - code: "930955.CSI"
+    name: "中证红利低波100(官方)"
+    note: "对标指数，建议后续拉取官方数据做持仓重合度对比"
+  - code: "800红利(931644复现)"
+    name: "自建800红利策略"
+    annual_full: 5.93
+    annual_aligned: 9.65
+    note: "拉齐2016后红利低波vs800红利 -0.36pp，超额主要来自2015时间差"
+  - code: "FCF E版(对齐)"
+    name: "自建FCF策略(最优)"
+    annual_full: 15.80
+    annual_aligned: 17.00
+    note: "FCF质量因子持续领先 +7.71pp(对齐后)"
+  - code: "932368.CSI"
+    name: "中证800现金流"
+    annual: 10.02
+  - code: "H00300.CSI"
+    name: "沪深300全收益"
+    annual: 1.54
+
+# ──────────────────────────────────────
+# 代码入口
+# ──────────────────────────────────────
+code:
+  engine: "weekly_harness/dividend_lowvol.py"
+  entry: "run_dividend_lowvol.py"
+  run_command: "python run_dividend_lowvol.py"
+  download: "python run_dividend_lowvol.py --download"
+  basket_only: "python run_dividend_lowvol.py --basket-only"
+  nav_only: "python run_dividend_lowvol.py --nav-only"
+  report_only: "python run_dividend_lowvol.py --report-only"
+
+# ──────────────────────────────────────
+# 输出路径
+# ──────────────────────────────────────
+output:
+  baskets: "output/div_lowvol_100/baskets/"
+  nav_csv: "output/div_lowvol_100/nav_daily.csv"
+  report: "docs/2026-06-13_红利低波100回测报告.md"
+
+# ──────────────────────────────────────
+# 数据依赖
+# ──────────────────────────────────────
+data:
+  dividend: "data/dividend_history/*.csv"
+  index_weights: "data/index_weights/index_weight_000906.SH.csv"
+  prices: "data/price_snapshots/*.csv"
+  volatility: "data/volatility_cache/vol_*.csv"
+  pct_chg_matrix: "data/daily_pct_chg.parquet"
+  adj_close_cache: "data/adj_close_cache/*.csv"
+  stock_basic: "data/stock_basic.csv"
+
+# ──────────────────────────────────────
+# 关键发现
+# ──────────────────────────────────────
+findings:
+  vs_800div_full: |
+    全区间年化 +5.38pp（11.31% vs 5.93%），但主要是2015年时间差贡献：
+    红利低波100从3月起（吃到泡沫冲顶+70%），800红利从6月起（刚好顶部）
+  vs_800div_aligned: |
+    拉齐2016年后：红利低波 9.29% vs 800红利 9.65% = -0.36pp
+    波动率筛选在此区间并未提供显著超额，两者几乎持平
+    但最大回撤从-30.77%改善到-16.36%（对齐后）
+  vs_fcf: |
+    FCF E版 17.00%（对齐后）持续大幅领先 +7.71pp
+    FCF质量因子仍然是当前最优策略
+  performance: |
+    选股全程零API（纯本地读盘），全45期 < 1秒
+    波动率从adj_close_cache本地构建pct_chg矩阵（parquet），
+    46期波动率计算从>1小时降至2.3秒
+  data_quality: |
+    D1-D8 全部通过
+    分红覆盖率 99.9%，波动率覆盖率 98.2%
+    行业覆盖率 92.5%（申万一级代理中证二级）

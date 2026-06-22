@@ -293,12 +293,200 @@ class MarketSignals:
         except Exception as e:
             return BullBearSignal("震荡", 0.0, f"计算异常: {e}", "无法判断牛熊周期")
 
+    # ── ETF 定投信号 ─────────────────────────────────────────
+
+    def get_etf_dca_signal(self, ts_code: str, etf_name: str, bond_yield: float) -> Dict:
+        """
+        ETF 定投信号分析（基于文章第七部分策略）
+
+        策略核心指标：
+          1. 60周线偏离度：当前价格相对60周均线的偏离百分比
+             - 低于60周线      → 开始定投区间
+             - 偏离60周线 -10% → 加大定投
+             - 高于60周线 +10% → 停止定投
+             - 高于60周线 +15% → 减仓
+          2. 20月线偏离度：当前价格相对20月均线的偏离百分比
+             - 跌破20月线      → 触发定投信号（五年来难得机会）
+          3. 股息率绝对值：
+             - 股息率 ≥ 5.0% → 开始/加大定投
+             - 股息率 4.0-5.0% → 可以定投
+             - 股息率 < 4.0%  → 停止定投
+             - 股息率 < 3.5%  → 减仓
+          4. 股债息差：
+             - 息差 > 4% (400BP) → 强定投信号
+
+        Returns
+        -------
+        dict: {
+            "ma60w": 60周均线价格,
+            "ma20m": 20月均线价格,
+            "dev_60w": 偏离60周线百分比（负=低于，正=高于）,
+            "dev_20m": 偏离20月线百分比,
+            "div_yield": 当前股息率,
+            "bond_spread_bp": 股债息差(BP),
+            "dca_action": 定投建议(开始/加大/停止/减仓/持有),
+            "dca_reason": 建议原因,
+            "signals": [激活的信号列表],
+        }
+        """
+        try:
+            pro = self._get_pro()
+            end_date = datetime.now().strftime("%Y%m%d")
+
+            # 获取近3年日线数据（足够计算60周线约420个交易日）
+            start_date_3y = (datetime.now() - pd.DateOffset(years=3)).strftime("%Y%m%d")
+
+            df = pro.fund_daily(
+                ts_code=ts_code,
+                start_date=start_date_3y, end_date=end_date,
+                fields="trade_date,close,high,low"
+            )
+
+            if df is None or df.empty or len(df) < 60:
+                return {"dca_action": "数据不足", "dca_reason": f"{etf_name} 日线数据不足", "signals": []}
+
+            df = df.sort_values("trade_date").reset_index(drop=True)
+            df["close"] = pd.to_numeric(df["close"], errors="coerce")
+
+            current_price = float(df.iloc[-1]["close"])
+            if current_price <= 0:
+                return {"dca_action": "数据异常", "dca_reason": "价格数据异常", "signals": []}
+
+            # 1. 计算60周线（约300个交易日，A股每年约250个交易日，60周=约300个交易日）
+            MA60W_DAYS = 300
+            if len(df) >= MA60W_DAYS:
+                ma60w = float(df["close"].tail(MA60W_DAYS).mean())
+            else:
+                ma60w = float(df["close"].mean())
+
+            dev_60w = (current_price / ma60w - 1) * 100  # 正=高于，负=低于
+
+            # 2. 计算20月线（约420个交易日）
+            MA20M_DAYS = 420
+            if len(df) >= MA20M_DAYS:
+                ma20m = float(df["close"].tail(MA20M_DAYS).mean())
+            else:
+                ma20m = float(df["close"].mean())
+
+            dev_20m = (current_price / ma20m - 1) * 100
+
+            # 3. 获取当前股息率（从 fund_div 接口估算年化）
+            div_yield = 0.0
+            try:
+                df_div = pro.fund_div(ts_code=ts_code)
+                if df_div is not None and not df_div.empty:
+                    df_div["div_cash"] = pd.to_numeric(df_div["div_cash"], errors="coerce").fillna(0)
+                    df_div = df_div[df_div["div_cash"] > 0]
+                    if not df_div.empty:
+                        df_div["ex_date"] = df_div["ex_date"].astype(str)
+                        df_div = df_div.drop_duplicates(subset=["ex_date"])
+                        df_div["year"] = df_div["ex_date"].str[:4]
+                        # 取最近完整一年的分红
+                        latest_year = df_div["year"].max()
+                        annual_div = float(df_div[df_div["year"] == latest_year]["div_cash"].sum())
+                        if current_price > 0 and annual_div > 0:
+                            div_yield = annual_div / current_price * 100
+            except Exception:
+                pass
+
+            bond_spread_bp = (div_yield - bond_yield) * 100 if div_yield > 0 else 0
+
+            # 4. 综合判断定投信号
+            signals = []
+            if dev_60w < -10:
+                signals.append(f"📉 价格低于60周线{abs(dev_60w):.1f}%（加大定投区）")
+            elif dev_60w < 0:
+                signals.append(f"📉 价格低于60周线{abs(dev_60w):.1f}%（开始定投区）")
+
+            if dev_20m < 0:
+                signals.append(f"📅 价格低于20月线{abs(dev_20m):.1f}%（难得定投时机）")
+
+            if div_yield >= 5.0:
+                signals.append(f"💰 股息率{div_yield:.2f}% ≥ 5%（强烈定投信号）")
+            elif div_yield >= 4.0:
+                signals.append(f"💰 股息率{div_yield:.2f}% ≥ 4%（可以定投）")
+
+            if bond_spread_bp >= 400:
+                signals.append(f"📊 股债息差{bond_spread_bp:.0f}BP ≥ 400BP（极佳买点）")
+            elif bond_spread_bp >= 230:
+                signals.append(f"📊 股债息差{bond_spread_bp:.0f}BP ≥ 230BP（历史高位）")
+
+            # 综合建议
+            if dev_60w >= 15:
+                dca_action = "减仓"
+                dca_reason = f"价格高于60周线{dev_60w:.1f}%（偏离≥15%减仓区），锁定利润"
+            elif dev_60w >= 10:
+                dca_action = "停止定投"
+                dca_reason = f"价格高于60周线{dev_60w:.1f}%（偏离≥10%停止区），等待回调"
+            elif dev_60w < -10 or dev_20m < 0:
+                dca_action = "加大定投"
+                dca_reason = f"价格低于60周线{abs(dev_60w):.1f}%或跌破20月线，历史极佳买点"
+                if div_yield >= 5.0:
+                    dca_action = "大力定投"
+                    dca_reason += f"，且股息率{div_yield:.2f}%已达5%+"
+            elif dev_60w < 0 or div_yield >= 4.0:
+                dca_action = "开始定投"
+                dca_reason = f"价格低于60周线或股息率{div_yield:.2f}%达定投阈值，可分批买入"
+            elif div_yield < 3.5:
+                dca_action = "减仓"
+                dca_reason = f"股息率{div_yield:.2f}% < 3.5%（减仓线），估值偏高"
+            elif div_yield < 4.0:
+                dca_action = "停止定投"
+                dca_reason = f"股息率{div_yield:.2f}% < 4%（停止定投线），等待回调"
+            else:
+                dca_action = "持有"
+                dca_reason = "维持现有仓位，等待更好机会"
+
+            return {
+                "etf_name": etf_name,
+                "current_price": round(current_price, 3),
+                "ma60w": round(ma60w, 3),
+                "ma20m": round(ma20m, 3),
+                "dev_60w": round(dev_60w, 1),
+                "dev_20m": round(dev_20m, 1),
+                "div_yield": round(div_yield, 2),
+                "bond_spread_bp": round(bond_spread_bp, 0),
+                "dca_action": dca_action,
+                "dca_reason": dca_reason,
+                "signals": signals,
+            }
+
+        except Exception as e:
+            return {
+                "etf_name": etf_name,
+                "dca_action": "计算失败",
+                "dca_reason": f"异常: {e}",
+                "signals": [],
+            }
+
     # ── 综合信号 ──────────────────────────────────────────────
 
-    def get_all_signals(self) -> Dict:
-        """获取所有市场信号"""
+    def get_all_signals(self, bond_yield: float = 1.65) -> Dict:
+        """
+        获取所有市场信号
+
+        Parameters
+        ----------
+        bond_yield : float
+            当前10年期国债收益率，用于 ETF 定投信号息差计算
+        """
         rotation = self.get_rotation_signal()
         bullbear = self.get_bull_bear_signal()
+
+        # ETF 定投信号（两大主流红利 ETF）
+        etf_dca_signals = {}
+        try:
+            etf_dca_signals["515180.SH"] = self.get_etf_dca_signal(
+                "515180.SH", "易方达红利ETF", bond_yield
+            )
+        except Exception:
+            pass
+        try:
+            etf_dca_signals["563020.SH"] = self.get_etf_dca_signal(
+                "563020.SH", "红利低波ETF", bond_yield
+            )
+        except Exception:
+            pass
 
         # 综合仓位建议
         position_suggestion = "正常"
@@ -315,4 +503,5 @@ class MarketSignals:
             "rotation": rotation,
             "bullbear": bullbear,
             "position_suggestion": position_suggestion,
+            "etf_dca_signals": etf_dca_signals,
         }
