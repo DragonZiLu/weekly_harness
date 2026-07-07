@@ -2250,8 +2250,8 @@ class BacktestEngine:
                 bm_name = self._get_benchmark_name(bc)
                 bm_cols_h += f" | {bm_name} | 超额"
                 bm_cols_s += " |--------|--------"
-            lines.append(f"| 年份 | 年初资产 | 年末资产 | 总收益 | 股价收益 | 股息收益 | 最大回撤 │ 买入 | 卖出 | 手续费 | 分红次数 | 分红金额{bm_cols_h} |")
-            lines.append(f"|------|---------|---------|--------|---------|---------|--------|------|------|--------|---------|---------{bm_cols_s} |")
+            lines.append(f"| 年份 | 年初资产 | 年末资产 | 总收益 | 股价收益 | 股息收益 | 最大回撤 | 买入 | 卖出 | 手续费 | 分红次数 | 分红金额{bm_cols_h} |")
+            lines.append(f"|------|---------|---------|--------|---------|---------|---------|------|------|--------|---------|---------{bm_cols_s} |")
             for yr in yearly:
                 bm_cols_v = ""
                 yr_benchmarks = yr.get("benchmarks", {})
@@ -2265,7 +2265,7 @@ class BacktestEngine:
                 lines.append(
                     f"| {yr['year']} | {yr['start_value']:,.0f} | {yr['end_value']:,.0f} | "
                     f"**{yr['total_return']:+.1f}%** | {yr['price_return']:+.1f}% | "
-                    f"{yr['dividend_return']:+.1f}% | {yr['max_drawdown']:.1f}% │ "
+                    f"{yr['dividend_return']:+.1f}% | {yr['max_drawdown']:.1f}% | "
                     f"{yr['buy_count']} | {yr['sell_count']} | {yr['commission']:,.0f} | "
                     f"{yr['div_count']} | {yr['div_total']:,.0f}{bm_cols_v} |"
                 )

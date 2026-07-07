@@ -99,6 +99,13 @@ WATCHLIST = [
         "type": "etf",
         "benchmark": False,
     },
+    {
+        "code": "159399.SZ",
+        "name": "现金流ETF国泰(159399)",
+        "category": "现金流ETF",
+        "type": "etf",
+        "benchmark": False,
+    },
 
     # ── 自建 800红利策略 ────────────────────────────────────────
     {
