@@ -138,12 +138,16 @@ class MarketSignals:
                 "lookback_months": lookback_months,
             }
 
+            # 临界提示：spread 绝对值进入阈值 80% 区间内（如 12%~15%），容易翻转
+            near_threshold = abs(spread) >= threshold * 0.8 and abs(spread) < threshold
+            critical_note = "（⚠️ 接近轮动阈值，风格临界）" if near_threshold else ""
+
             if spread > threshold:
                 strength = min(spread / 50, 1.0)  # 归一化
                 return RotationSignal(
                     style="红利",
                     strength=round(strength, 2),
-                    reason=f"近{lookback_months}月红利+{div_ret:.1f}% vs 成长{gro_ret:+.1f}%，红利领先{spread:.1f}%",
+                    reason=f"近{lookback_months}月红利{div_ret:+.1f}% vs 成长{gro_ret:+.1f}%，红利领先{spread:.1f}%",
                     suggestion="红利强势期，红利策略可积极布局",
                     detail=detail,
                 )
@@ -152,7 +156,7 @@ class MarketSignals:
                 return RotationSignal(
                     style="成长",
                     strength=round(strength, 2),
-                    reason=f"近{lookback_months}月成长{gro_ret:+.1f}% vs 红利+{div_ret:.1f}%，成长领先{abs(spread):.1f}%",
+                    reason=f"近{lookback_months}月成长{gro_ret:+.1f}% vs 红利{div_ret:+.1f}%，成长领先{abs(spread):.1f}%",
                     suggestion="成长强势期，红利策略需谨慎，降低仓位",
                     detail=detail,
                 )
@@ -160,7 +164,7 @@ class MarketSignals:
                 return RotationSignal(
                     style="均衡",
                     strength=0.0,
-                    reason=f"近{lookback_months}月红利+{div_ret:.1f}% vs 成长{gro_ret:+.1f}%，风格均衡",
+                    reason=f"近{lookback_months}月红利{div_ret:+.1f}% vs 成长{gro_ret:+.1f}%，风格均衡{critical_note}",
                     suggestion="风格均衡，维持正常仓位",
                     detail=detail,
                 )
