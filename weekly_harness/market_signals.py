@@ -491,6 +491,12 @@ class MarketSignals:
             )
         except Exception:
             pass
+        try:
+            etf_dca_signals["159201.SZ"] = self.get_etf_dca_signal(
+                "159201.SZ", "自由现金流ETF华夏", bond_yield
+            )
+        except Exception:
+            pass
 
         # 综合仓位建议
         position_suggestion = "正常"
